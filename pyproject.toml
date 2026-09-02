@@ -1,0 +1,25 @@
+[project]
+name = "ouroboros"
+version = "0.1.0"
+description = "Interviews a developer, then generates a guard-railed agent harness repo."
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.7",
+    "pyyaml>=6.0",
+    "langgraph>=0.2",
+    "langchain-anthropic>=0.3",
+    "langchain-core>=0.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["ouroboros*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

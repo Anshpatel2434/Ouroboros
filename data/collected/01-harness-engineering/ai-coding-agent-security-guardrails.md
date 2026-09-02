@@ -1,5 +1,5 @@
 ---
-title: AI Coding Agent Security: Practical Guardrails for Claude Code, Copilot, and Codex
+title: "AI Coding Agent Security: Practical Guardrails for Claude Code, Copilot, and Codex"
 source_url: https://dev.to/maxkrivich/ai-coding-agent-security-practical-guardrails-for-claude-code-copilot-and-codex-och
 publisher: Max Kryvych on DEV Community
 retrieved: 2026-08-26

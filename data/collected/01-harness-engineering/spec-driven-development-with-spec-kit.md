@@ -1,5 +1,5 @@
 ---
-title: Spec-driven development with AI: Get started with a new open source toolkit
+title: "Spec-driven development with AI: Get started with a new open source toolkit"
 source_url: https://github.blog/ai-and-ml/generative-ai/spec-driven-development-with-ai-get-started-with-a-new-open-source-toolkit/
 publisher: GitHub
 retrieved: 2026-08-26

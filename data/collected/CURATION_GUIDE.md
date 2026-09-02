@@ -53,3 +53,9 @@ Required sections, in order:
   understand what the source teaches.
 - If a source is unreachable, do not fabricate its content; note it in the
   manifest as `status: unreachable` with the URL.
+- Frontmatter must be valid YAML. Any value containing a colon-space, a leading
+  `#`, or a leading `[`/`{` has to be double-quoted — titles like
+  `"Spec-driven development with AI: Get started"` parse as a nested mapping
+  otherwise, and the retriever silently drops the document.
+- `tests/test_corpus.py` is the enforcement: it loads every document and asserts
+  the expected count, so a malformed file fails the suite rather than vanishing.
