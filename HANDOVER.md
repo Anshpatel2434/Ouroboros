@@ -18,43 +18,56 @@ Three subsystems:
 |---|---|
 | **The Inquisitor** | A LangGraph interviewer that interrogates a human developer until the project spec is complete and contradiction-free. Refuses to finish while ambiguity remains. |
 | **The Generator** | Turns the passed spec into an **Agent Harness Repo**: constitution, task backlog, verification suite, state files, git/CI interception wiring. |
-| **The Slop Inspector** | A server-side LangGraph loop that evaluates every commit the coding agent makes against the spec, reports findings with rectification steps, and proposes instruction patches when the agent drifts. |
+| **The Slop Inspector** | **v2, not built.** A loop that would evaluate every commit the agent makes against the spec and propose instruction patches when it drifts. Deferred deliberately — see section 2. |
 
-**Stack:** Python + LangGraph (orchestration, inspection), TypeScript/Next.js
-(dashboard). A database for the knowledge corpus — connection string not yet
-provided at time of writing.
+**Stack:** Python + LangGraph (orchestration), TypeScript/Next.js (local UI). A
+database for the knowledge corpus — connection string not yet provided at time
+of writing, so the corpus is currently retrieved from files on disk.
 
 ---
 
 ## 2. Current state of the repo
 
+**v1 scope was narrowed on 2026-09-02 by the project owner.** The Slop Inspector
+(commit-time drift detection) is deferred to v2. v1 is the **Kickoff Generator**
+only: interview, ambiguity lint, generate, self-review, publish.
+
+What that removes from v1: the hosted backend, webhooks and commit polling, PAT
+monitoring, verdict feeds, and instruction-patch PRs. GitHub access returns only
+at *generation* time, to create the repo and push once.
+
+What it does not remove: the guardrails baked into the generated repo. Those are
+Generator outputs, they run locally, and they cost nothing.
+
 ```
 Ouroboros/
+├── README.md                    <- how to run it
 ├── HANDOVER.md                  <- you are here
-└── data/
-    └── collected/               <- the Knowledge Corpus (COMPLETE, 45 docs)
-        ├── CURATION_GUIDE.md    <- the format every corpus doc must follow
-        ├── MANIFEST.json        <- machine-readable index (frontmatter of all 45)
-        ├── README.md            <- human-readable index, per-domain tables
-        ├── 01-harness-engineering/       (10 docs)
-        ├── 02-claude-code-mechanics/     (9 docs)
-        ├── 03-orchestration-langgraph/   (10 docs)
-        ├── 04-evaluation-slop-detection/ (8 docs)
-        └── 05-git-github-integration/    (8 docs)
+├── pyproject.toml
+├── ouroboros/
+│   ├── models/                  ProjectSpec, interview drafts, repo blueprints
+│   ├── corpus/                  BM25 retrieval over data/collected
+│   ├── inquisitor/              ambiguity lint, semantic lint, research, interview graph
+│   ├── generator/               planners, templates, runner templates, review, build
+│   ├── publish/                 GitHub repo creation and push
+│   ├── llm/                     the structured-output layer
+│   └── server/                  local FastAPI
+├── web/                         local Next.js interview UI
+├── tests/                       53 tests, no API key or network needed
+└── data/collected/              the Knowledge Corpus (45 docs)
 ```
 
-**No application code has been written yet.** The project is deliberately still
-in its design + research phase. Two phases are complete:
+All five build slices are complete and pushed:
 
-1. **Inquisitor Phase (done)** — a structured interview with the project owner
-   locked 18 architectural decisions. They are reproduced in full in section 4.
-2. **Corpus Phase (done)** — 45 authoritative sources were researched, curated
-   into a uniform note format, verified (0 format problems), and indexed.
+1. Spec contract, ambiguity lint, corpus retrieval
+2. The LangGraph interview loop (questions, integration, research, lint, converge)
+3. The Generator: backlog planning, skeleton planning, templates, self-review
+4. The local web UI and its API
+5. The runner scripts and GitHub publishing
 
-**Next phase (not started):** load and embed the corpus into a database, then
-begin building the three subsystems.
-
----
+Verified working end to end in a browser: UI to API to LLM layer, including the
+error path when no API key is set. Not yet exercised against a live model — that
+needs an `ANTHROPIC_API_KEY`, and is the first thing to do next.
 
 ## 3. The Knowledge Corpus
 
@@ -269,14 +282,23 @@ These came out of the corpus work and constrain the implementation:
 
 ## 7. Where to pick up
 
-1. **Database load (immediate next step).** The project owner will supply a
-   connection string. Design the corpus schema — documents + chunks + embeddings —
-   load the 45 documents, and wire the gap-research write-back path (D7/D9).
-   `MANIFEST.json` was built to make this mechanical.
-2. **Architecture blueprint.** LangGraph graph topologies for the three
-   subsystems, the backend/dashboard service boundary, and the data model behind
-   the verdict feed.
-3. **Then implementation**, subsystem by subsystem.
+1. **Run it against a live model.** Set `ANTHROPIC_API_KEY` and take one real
+   project through the whole flow. Everything is proven against a scripted LLM;
+   nothing has yet met a real one. Expect the interview prompts and the backlog
+   planner to need tuning after the first honest run.
+2. **Revisit the generation quality gate.** v1 ships an LLM self-review as the
+   only gate on generated repos, by the owner's decision. It cannot prove
+   `verify.sh` runs — and the agent's first act is to run it in a loop. The seam
+   for adding real scaffold execution is `generator/review.py`
+   (`structural_findings` is already the non-judgement half), and our own test
+   suite already executes generated scripts, so the machinery exists. Recommended
+   after the first generated repo is inspected by hand.
+3. **Database load.** The owner will supply a connection string. Design the
+   corpus schema (documents + chunks + embeddings), load the 45 documents, and
+   implement `corpus.retriever.Retriever` with a vector backend — the protocol
+   exists so this swaps in without touching callers. `MANIFEST.json` was built to
+   make the load mechanical.
+4. **Then v2: the Slop Inspector**, on the foundation this v1 lays down.
 
 ### Working conventions
 

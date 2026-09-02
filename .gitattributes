@@ -1,0 +1,6 @@
+# Keep LF in the repository and in working copies on every platform.
+# Generated harness repos ship bash scripts; CRLF would break their shebangs.
+* text=auto eol=lf
+*.png binary
+*.jpg binary
+*.zip binary
