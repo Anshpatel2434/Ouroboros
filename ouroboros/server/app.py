@@ -213,6 +213,13 @@ def publish_repo(thread_id: str, request: PublishRequest) -> dict[str, Any]:
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
+    """Reports the model configuration too, so a missing key is visible before
+    a developer has answered twenty questions."""
     from ouroboros.corpus.retriever import FileCorpusRetriever
+    from ouroboros.llm.client import describe_configuration
 
-    return {"status": "ok", "corpus_documents": len(FileCorpusRetriever())}
+    return {
+        "status": "ok",
+        "corpus_documents": len(FileCorpusRetriever()),
+        **describe_configuration(),
+    }

@@ -1,0 +1,98 @@
+"""Provider selection. No network: these only exercise configuration."""
+
+from __future__ import annotations
+
+import pytest
+
+from ouroboros.llm.client import (
+    PROVIDER_MODELS,
+    AnthropicLLM,
+    GroqLLM,
+    active_provider,
+    build_llm,
+    describe_configuration,
+    model_for,
+)
+
+ENV_VARS = [
+    "OUROBOROS_LLM_PROVIDER",
+    "OUROBOROS_DEFAULT_MODEL",
+    "OUROBOROS_CRITIC_MODEL",
+    "GROQ_API_KEY",
+    "ANTHROPIC_API_KEY",
+]
+
+
+@pytest.fixture(autouse=True)
+def clean_env(monkeypatch):
+    """A .env is loaded at import time; each test starts from a known state."""
+    for name in ENV_VARS:
+        monkeypatch.delenv(name, raising=False)
+
+
+def test_groq_is_chosen_when_its_key_is_present(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    assert active_provider() == "groq"
+
+
+def test_anthropic_is_chosen_when_only_its_key_is_present(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    assert active_provider() == "anthropic"
+
+
+def test_groq_wins_when_both_keys_are_present(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+    assert active_provider() == "groq"
+
+
+def test_explicit_provider_overrides_the_keys(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    monkeypatch.setenv("OUROBOROS_LLM_PROVIDER", "anthropic")
+    assert active_provider() == "anthropic"
+
+
+def test_unknown_provider_fails_loudly(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_LLM_PROVIDER", "openai")
+    with pytest.raises(RuntimeError, match="expected one of"):
+        active_provider()
+
+
+def test_model_defaults_per_provider():
+    assert model_for("default", "groq") == "openai/gpt-oss-120b"
+    assert model_for("default", "anthropic") == "claude-sonnet-5"
+
+
+def test_model_override_is_respected(monkeypatch):
+    monkeypatch.setenv("OUROBOROS_DEFAULT_MODEL", "openai/gpt-oss-20b")
+    assert model_for("default", "groq") == "openai/gpt-oss-20b"
+
+
+def test_every_provider_defines_every_role():
+    for provider, roles in PROVIDER_MODELS.items():
+        assert {"default", "critic", "fast"} <= set(roles), provider
+
+
+def test_build_llm_returns_the_matching_implementation(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
+    assert isinstance(build_llm("default"), GroqLLM)
+
+    monkeypatch.setenv("OUROBOROS_LLM_PROVIDER", "anthropic")
+    assert isinstance(build_llm("critic"), AnthropicLLM)
+
+
+def test_missing_key_is_reported_before_any_request(monkeypatch):
+    """Construction is lazy, so the error must arrive on first use, not silently."""
+    monkeypatch.setenv("OUROBOROS_LLM_PROVIDER", "groq")
+    llm = build_llm("default")
+    with pytest.raises(RuntimeError, match="GROQ_API_KEY is not set"):
+        llm._client(1024)
+
+
+def test_health_configuration_never_leaks_the_key(monkeypatch):
+    monkeypatch.setenv("GROQ_API_KEY", "gsk_secret_value")
+    described = describe_configuration()
+
+    assert described["provider"] == "groq"
+    assert described["api_key_present"] is True
+    assert "gsk_secret_value" not in str(described)

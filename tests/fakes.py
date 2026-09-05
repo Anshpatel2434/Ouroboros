@@ -21,7 +21,9 @@ class FakeLLM:
         self._queues = {schema: list(items) for schema, items in responses.items()}
         self.calls: list[tuple[type[BaseModel], str]] = []
 
-    def structured(self, schema: type[T], system: str, user: str) -> T:
+    def structured(
+        self, schema: type[T], system: str, user: str, role: str = "default"
+    ) -> T:
         self.calls.append((schema, user))
         queue = self._queues.get(schema)
         if not queue:

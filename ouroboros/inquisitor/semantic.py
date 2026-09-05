@@ -30,10 +30,17 @@ class SemanticReport(BaseModel):
 
 def semantic_lint(llm: LLM, spec: ProjectSpec) -> LintReport:
     """Run the LLM checks and return them in the same shape as the hard lint."""
+    from ouroboros.llm.budget import trim_to_tokens
+    from ouroboros.llm.client import limits_for
+
+    body, _ = trim_to_tokens(
+        spec.model_dump_json(indent=2), limits_for().prompt_budget("lint") - 200
+    )
     result = llm.structured(
         SemanticReport,
         system=SEMANTIC_LINT,
-        user="Review this specification:\n\n" + spec.model_dump_json(indent=2),
+        user="Review this specification:\n\n" + body,
+        role="lint",
     )
 
     findings = [

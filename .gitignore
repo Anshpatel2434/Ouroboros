@@ -11,3 +11,8 @@ node_modules/
 .next/
 next-env.d.ts
 out/
+
+# never commit local secrets
+.env
+.env.*
+!.env.example

@@ -154,3 +154,28 @@ def test_every_finding_carries_evidence_and_rectification():
         assert finding.evidence.strip()
         assert finding.rectification.strip()
         assert finding.severity in (Severity.ERROR, Severity.WARNING)
+
+
+def test_angle_bracket_format_specs_are_not_placeholders():
+    """A real interview produced this and the lint wrongly refused it.
+
+    Output formats legitimately use angle brackets; only bracketed words that
+    read as an instruction to the author are placeholders.
+    """
+    spec = clean_spec(
+        requirements=[
+            Requirement(
+                id="R-001",
+                statement='Search output is formatted as "<file_path>:<line_number>: <snippet>".',
+                acceptance_criteria=[
+                    'Running the search prints lines matching "<file_path>:<line_number>: <snippet>".'
+                ],
+            )
+        ]
+    )
+    assert "PLACEHOLDER" not in codes(spec)
+
+
+def test_instructional_placeholders_are_still_caught():
+    for text in ("Set <your-api-key> in the env.", "Handle TBD cases.", "Use <insert value>."):
+        assert "PLACEHOLDER" in codes(clean_spec(problem=text)), text

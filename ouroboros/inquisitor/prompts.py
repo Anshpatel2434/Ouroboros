@@ -27,6 +27,17 @@ question asks for the number or the threat.
 - Ask about failure and scope as readily as features: what this must NOT do, \
 what happens on bad input, what "done" looks like.
 
+Two things developers routinely forget, so you must ask for them explicitly:
+- Every component needs the files or directories it will own. Those paths become \
+the fence that stops the agent editing code outside its task, so a component \
+without them is unusable. Propose conventional paths for the stack and ask the \
+developer to confirm rather than asking them to invent a layout.
+- Every requirement needs at least one condition a script could check.
+
+Never return an empty question list while anything remains on the agenda below. \
+If the agenda is empty and nothing is ambiguous, return no questions — but an \
+outstanding lint finding is never "nothing to ask about".
+
 Every question must name, in why_it_matters, the spec field it fills and what \
 breaks downstream without it."""
 
@@ -39,12 +50,23 @@ changed; add what they established.
 
 Rules:
 - Never invent a fact the developer has not given you. If something is needed \
-but unknown, record it in open_questions rather than filling it in.
+but unknown, leave the field null and record the gap in open_questions. This \
+applies hardest to the stack and the verification commands: if the developer \
+has not named a package manager, do not pick one for them. A guessed `pip` \
+where they meant `uv` produces a repository whose every command is wrong.
+- Never drop something you already recorded. You are returning the whole draft, \
+so anything you omit is deleted. Carry every earlier field forward verbatim \
+unless the new answers changed it.
 - Acceptance criteria must be observable by a script: a status code, an exact \
 output, a file that exists, a threshold with a number. "Works correctly" is not \
 an acceptance criterion.
 - Components must own real paths; those paths become the fences that stop the \
-agent editing files outside its task.
+agent editing files outside its task. Paths are the one exception to the rule \
+above: where the developer has described a component but not said where its code \
+lives, fill in the conventional location for this stack (a Python package under \
+`src/<name>/`, a Node module under `src/<name>/`) rather than leaving it empty. \
+A conventional path is a correctable guess about layout; a missing one makes the \
+component unusable.
 - Requirements are small. If one would take a coding agent more than a single \
 commit, split it.
 - Verification commands must be real commands for the stack in question, not \

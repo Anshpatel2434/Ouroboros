@@ -193,3 +193,29 @@ def test_transcript_records_every_exchange(deps):
     assert result["transcript"] == [
         {"question": "What problem does this solve?", "answer": "Chasing invoices."}
     ]
+
+
+def test_missing_fields_names_unfenced_components():
+    """The agenda must surface anything the lint will refuse for.
+
+    A live interview stalled here: every required field was filled, so the
+    interviewer was told there was nothing left to ask, while the lint kept
+    refusing because no component had paths.
+    """
+    draft = complete_draft()
+    draft.components = [Component(name="Indexer", responsibility="Builds the index.", paths=[])]
+
+    missing = draft.missing_fields()
+    assert any("paths for components" in field and "Indexer" in field for field in missing)
+
+
+def test_missing_fields_names_requirements_without_criteria():
+    draft = complete_draft()
+    draft.requirements = [Requirement(id="R-009", statement="Search notes.")]
+
+    missing = draft.missing_fields()
+    assert any("acceptance criteria" in field and "R-009" in field for field in missing)
+
+
+def test_complete_draft_reports_nothing_missing():
+    assert complete_draft().missing_fields() == []

@@ -172,6 +172,25 @@ class FileCorpusRetriever:
         hits.sort(key=lambda h: h.score, reverse=True)
         return hits[:limit]
 
+    def register(self, path: Path) -> CorpusDocument | None:
+        """Add a document written after this retriever was built.
+
+        Gap research writes a playbook mid-interview; without this the retriever
+        keeps its startup snapshot, the next lookup misses, and the same stack
+        gets researched again on every round.
+        """
+        document = _parse_document(Path(path))
+        if document is None:
+            return None
+
+        self.documents = [d for d in self.documents if d.slug != document.slug]
+        self.documents.append(document)
+        self._doc_freq.update(set(document._terms))
+        self._avg_len = sum(sum(d._terms.values()) for d in self.documents) / len(
+            self.documents
+        )
+        return document
+
     def by_domain(self, domain: str) -> list[CorpusDocument]:
         return [d for d in self.documents if d.domain == domain]
 

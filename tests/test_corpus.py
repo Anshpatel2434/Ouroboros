@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from ouroboros.corpus.retriever import FileCorpusRetriever
+from ouroboros.corpus.retriever import CORPUS_ROOT, FileCorpusRetriever
 
 
 @pytest.fixture(scope="module")
@@ -12,18 +12,39 @@ def retriever() -> FileCorpusRetriever:
     return FileCorpusRetriever()
 
 
-def test_corpus_loads_every_document(retriever):
-    assert len(retriever) == 45
+def test_loader_drops_nothing(retriever):
+    """The invariant that matters: every document on disk is actually loaded.
+
+    Not a fixed count — gap research legitimately grows the corpus. Two
+    documents once vanished because unquoted colons made their frontmatter
+    invalid YAML, and this is the check that would have caught it.
+    """
+    on_disk = {
+        path.stem
+        for path in CORPUS_ROOT.rglob("*.md")
+        if path.name not in {"README.md", "CURATION_GUIDE.md"}
+    }
+    loaded = {doc.slug for doc in retriever.documents}
+
+    assert on_disk - loaded == set(), f"documents silently dropped: {on_disk - loaded}"
+    assert len(retriever) == len(on_disk)
 
 
-def test_all_domains_present(retriever):
-    assert {d.domain for d in retriever.documents} == {
+def test_curated_domains_are_all_present(retriever):
+    """The seed corpus. Researched stack playbooks add domains beyond these."""
+    assert {
         "harness-engineering",
         "claude-code-mechanics",
         "orchestration-langgraph",
         "evaluation-slop-detection",
         "git-github-integration",
-    }
+    } <= {d.domain for d in retriever.documents}
+
+
+def test_seed_corpus_is_intact(retriever):
+    """The 45 curated documents must never quietly shrink."""
+    curated = [d for d in retriever.documents if d.domain != "stack-playbooks"]
+    assert len(curated) == 45
 
 
 def test_documents_expose_key_knowledge(retriever):

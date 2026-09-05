@@ -133,30 +133,97 @@ def structural_findings(blueprint: RepoBlueprint) -> list[ReviewFinding]:
     return findings
 
 
-def _render_for_review(blueprint: RepoBlueprint, budget: int = 60_000) -> str:
-    """The repository as text, truncated per-file so no single file eats the budget."""
-    per_file = max(1200, budget // max(len(blueprint.files), 1))
-    chunks = []
-    for generated in blueprint.files:
-        body = generated.contents
-        if len(body) > per_file:
-            body = body[:per_file] + "\n... [truncated for review]"
+# The structural checks already cover the mandatory inventory and the state
+# files, so the critic's budget goes to what only judgement can assess: the
+# commands that must run, the checks that must prove something, and the
+# skeleton that must build.
+_LOW_VALUE_FOR_REVIEW = (
+    "state/",
+    ".gitignore",
+    "README.md",
+    ".github/",
+    "runner/",
+    "spec.md",
+)
+
+
+def _review_priority(path: str) -> int:
+    if path == "verify.sh" or path == "init.sh":
+        return 0
+    if path.startswith("checks/"):
+        return 1
+    if path == "CLAUDE.md":
+        return 2
+    if path.startswith(_LOW_VALUE_FOR_REVIEW):
+        return 9
+    return 3  # skeleton files
+
+
+def _render_for_review(blueprint: RepoBlueprint, budget: int) -> str:
+    """The repository as text, most review-worthy files first, inside a budget."""
+    ordered = sorted(blueprint.files, key=lambda f: (_review_priority(f.path), f.path))
+
+    chunks: list[str] = []
+    remaining = budget
+    for generated in ordered:
+        if remaining <= 0:
+            chunks.append(f"===== {generated.path} ===== [omitted, budget exhausted]")
+            continue
+        allowance = min(len(generated.contents), max(300, remaining // 3))
+        body = generated.contents[:allowance]
+        if allowance < len(generated.contents):
+            body += "\n... [truncated]"
         chunks.append(f"===== {generated.path} =====\n{body}")
+        remaining -= allowance
+
     return "\n\n".join(chunks)
+
+
+def _backlog_digest(blueprint: RepoBlueprint) -> str:
+    """The backlog as compact lines rather than JSON, which triples the tokens."""
+    lines = []
+    for task in blueprint.backlog.tasks:
+        lines.append(
+            f"{task.id} [{task.requirement_id or 'no requirement'}] {task.title}\n"
+            f"  scope: {', '.join(task.scope_paths) or 'NONE'}\n"
+            f"  done_when: {'; '.join(task.done_when) or 'NONE'}\n"
+            f"  depends_on: {', '.join(task.depends_on) or 'none'}"
+        )
+    return "\n".join(lines) or "(empty backlog)"
+
+
+def _spec_digest(blueprint: RepoBlueprint) -> str:
+    spec = blueprint.spec
+    requirements = "\n".join(
+        f"  {r.id}: {r.statement} | accepted when: {'; '.join(r.acceptance_criteria)}"
+        for r in spec.requirements
+    )
+    return (
+        f"{spec.name} — {spec.one_line}\n"
+        f"stack: {spec.stack.language} {spec.stack.language_version}, "
+        f"{spec.stack.framework or 'no framework'}, {spec.stack.package_manager}\n"
+        f"verification: {', '.join(f'{k}={v}' for k, v in spec.verification.commands())}\n"
+        f"non-goals: {'; '.join(spec.non_goals) or 'none'}\n"
+        f"requirements:\n{requirements}"
+    )
 
 
 def self_review(llm: LLM, blueprint: RepoBlueprint) -> ReviewReport:
     """Structural checks first, then the critic on what survives."""
+    from ouroboros.llm.client import context_chars
+
     structural = structural_findings(blueprint)
 
     report = llm.structured(
         ReviewReport,
         system=SELF_REVIEW,
         user=(
-            f"Specification:\n{blueprint.spec.model_dump_json(indent=2)}\n\n"
-            f"Backlog:\n{blueprint.backlog.model_dump_json(indent=2)}\n\n"
-            f"Generated repository:\n{_render_for_review(blueprint)}"
+            f"Specification:\n{_spec_digest(blueprint)}\n\n"
+            f"Backlog:\n{_backlog_digest(blueprint)}\n\n"
+            f"Generated repository:\n"
+            + _render_for_review(blueprint, context_chars("review"))
         ),
+        role="review",
     )
 
     combined = structural + report.findings

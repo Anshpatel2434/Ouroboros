@@ -86,7 +86,12 @@ class SpecDraft(BaseModel):
     open_questions: list[str] = Field(default_factory=list)
 
     def missing_fields(self) -> list[str]:
-        """Required fields still empty, for steering the next question batch."""
+        """Required fields still empty, for steering the next question batch.
+
+        This drives the interview's agenda, so anything the lint will refuse for
+        has to appear here — otherwise the interviewer is told there is nothing
+        left to ask while the spec is still unusable.
+        """
         missing = [
             field
             for field in ("name", "one_line", "problem", "stack", "verification")
@@ -95,6 +100,19 @@ class SpecDraft(BaseModel):
         for field in ("success_criteria", "components", "requirements"):
             if not getattr(self, field):
                 missing.append(field)
+
+        # A component with no paths cannot fence a task, and the lint refuses
+        # for it. Naming the specific components keeps the next question precise.
+        unfenced = [c.name for c in self.components if not c.paths]
+        if unfenced:
+            missing.append(f"paths for components: {', '.join(unfenced)}")
+
+        unverifiable = [r.id for r in self.requirements if not r.acceptance_criteria]
+        if unverifiable:
+            missing.append(
+                f"acceptance criteria for: {', '.join(unverifiable)}"
+            )
+
         return missing
 
     def to_spec(self) -> ProjectSpec | None:

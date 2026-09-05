@@ -27,6 +27,15 @@ grepping for source text; grepping for a function name proves nothing about \
 behaviour. Assume the working directory is the repo root.
 - depends_on: ids of tasks that must land first.
 
+Coverage is not optional: EVERY requirement id in the spec must be delivered by \
+at least one task, and every task must set requirement_id to the requirement it \
+serves. A spec with eight requirements does not produce a backlog of three \
+tasks. Work through the requirement list and account for each one.
+
+The check_script is a script BODY. Do not include a shebang and do not include \
+`set -euo pipefail`; those are added around it. Write real newlines, never the \
+two characters backslash-n.
+
 Order the backlog so dependencies come first and each task leaves the repo in a \
 working state — verify.sh must pass after every single task.
 
@@ -76,6 +85,12 @@ cycle.
 fail the project's own test command on a fresh clone.
 - Anything in the spec that no task delivers.
 - Instructions in CLAUDE.md that contradict the backlog or the guardrails.
+
+Files are shown to you shortened: a passage marked [truncated] or [omitted] was \
+cut to fit your context, not by the generator. Never report truncation, a file \
+ending mid-line, or an "incomplete" script as a defect — you are looking at an \
+excerpt, and reporting the excerpt as a bug sends the generator chasing a \
+problem that does not exist.
 
 Return findings with the exact file or task id, the evidence, and a concrete \
 fix. Set blocking=true only for something that would actually break the agent's \

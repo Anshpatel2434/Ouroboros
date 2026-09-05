@@ -29,10 +29,16 @@ VAGUE_TERMS = {
     "good", "better", "best", "nice", "smooth", "lightweight", "optimal",
 }
 
-# Markers that mean a human left the field unfinished.
+# Markers that mean a field was left unfinished.
+#
+# Angle brackets alone are NOT a placeholder: a real spec said search output must
+# look like "<file_path>:<line_number>: <snippet>", and a blanket <...> rule
+# refused that perfectly good requirement. Only bracketed words that read as an
+# instruction to the author count.
 PLACEHOLDER_PATTERN = re.compile(
-    r"\b(TBD|TODO|FIXME|XXX|N/?A|to be (decided|determined)|placeholder)\b"
-    r"|\?{2,}|<[a-z_ ]+>",
+    r"\b(TBD|TODO|FIXME|XXX|to be (decided|determined|confirmed)|placeholder)\b"
+    r"|\?{3,}"
+    r"|<(your|my|insert|fill|add|choose|pick|replace|todo|tbd|placeholder)\b[^>]*>",
     re.IGNORECASE,
 )
 

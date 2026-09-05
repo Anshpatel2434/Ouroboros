@@ -19,11 +19,11 @@ to prevent.
 
 ## Run it
 
-Requires Python 3.11+, Node 20+, and an `ANTHROPIC_API_KEY`.
+Requires Python 3.11+, Node 20+, and one model provider key.
 
 ```bash
 pip install -e .
-export ANTHROPIC_API_KEY=sk-ant-...
+cp .env.example .env    # then put your key in it
 python -m uvicorn ouroboros.server.app:app --port 8000
 ```
 
@@ -33,6 +33,30 @@ cd web && npm install && npm run dev
 
 Open the printed URL (http://localhost:3000 unless that port is taken). The API
 must be on port 8000, or set `NEXT_PUBLIC_API_BASE` in the web app.
+`GET /api/health` reports which provider and model are actually in use.
+
+### Model providers
+
+| Provider | Key | Default model |
+|---|---|---|
+| Groq (default) | `GROQ_API_KEY` | `openai/gpt-oss-120b` |
+| Anthropic | `ANTHROPIC_API_KEY` | `claude-sonnet-5` |
+
+Groq is chosen when its key is present; `OUROBOROS_LLM_PROVIDER` overrides that,
+and `OUROBOROS_DEFAULT_MODEL` / `OUROBOROS_CRITIC_MODEL` override the models.
+
+Two things about Groq are load-bearing rather than incidental, both measured
+against the live API:
+
+- **Structured output uses `json_schema`, not tool calling.** LangChain's default
+  function-calling path fails on schemas the size of `SpecDraft`. When a call is
+  rejected anyway, the JSON the model produced is salvaged from the error rather
+  than paid for twice.
+- **The free tier allows 8,000 tokens per minute and counts requested output
+  against it.** So output caps are set per role (a skeleton plan needs far more
+  room than a question batch), prompts are trimmed to what is left, and a rolling
+  token-bucket paces requests. A full interview takes several minutes as a
+  result — that is the quota, not the code.
 
 ## How it works
 

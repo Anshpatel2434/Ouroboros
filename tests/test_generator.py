@@ -9,7 +9,13 @@ import subprocess
 import pytest
 
 from ouroboros.corpus.retriever import FileCorpusRetriever
-from ouroboros.generator.build import GeneratorDeps, assemble, emit, generate
+from ouroboros.generator.build import (
+    GeneratorDeps,
+    _classify_feedback,
+    assemble,
+    emit,
+    generate,
+)
 from ouroboros.generator.planner import SkeletonPlan, _normalize_backlog
 from ouroboros.generator.review import ReviewFinding, ReviewReport, structural_findings
 from ouroboros.inquisitor.research import SkeletonFile
@@ -334,3 +340,108 @@ def test_runner_carries_the_circuit_breakers():
     assert "WALL_CLOCK_MINUTES = 90" in runner
     assert "BREAKER no-progress" in runner
     assert "BREAKER wall-clock" in runner
+
+
+# --------------------------------------------------------------------------- #
+# Lessons from live runs
+# --------------------------------------------------------------------------- #
+
+def test_check_script_bodies_are_cleaned():
+    """A live run produced literal backslash-n and a duplicate shebang.
+
+    The template supplies the shebang and `set -euo pipefail`; a second one
+    inside the body is a syntax error, so the check could never run.
+    """
+    messy = Backlog(
+        tasks=[
+            Task(
+                id="T-001",
+                title="Add search",
+                intent="x",
+                scope_paths=["app/"],
+                check_script="#!/usr/bin/env bash\nset -euo pipefail\npytest -q tests/test_search.py",
+            )
+        ]
+    )
+    cleaned = _normalize_backlog(messy, spec()).tasks[0].check_script
+
+    assert "\n" not in cleaned
+    assert not cleaned.startswith("#!")
+    assert "set -euo pipefail" not in cleaned
+    assert cleaned == "pytest -q tests/test_search.py"
+
+
+@pytest.mark.skipif(BASH is None, reason="bash unavailable")
+def test_cleaned_check_script_is_runnable(tmp_path):
+    dirty = Backlog(
+        tasks=[
+            Task(
+                id="T-001",
+                title="Add search",
+                requirement_id="R-001",
+                intent="x",
+                scope_paths=["app/"],
+                done_when=["it works"],
+                check_script="#!/usr/bin/env bash\nset -e\necho ran",
+            )
+        ]
+    )
+    emit(assemble(spec(), _normalize_backlog(dirty, spec()), skeleton()), tmp_path)
+    result = subprocess.run(
+        [BASH, "checks/T-001.sh"], cwd=tmp_path, capture_output=True, text=True
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ran" in result.stdout
+
+
+def test_review_feedback_is_routed_to_whoever_can_act_on_it():
+    """A live run turned harness-template findings into backlog tasks.
+
+    Feedback about a malformed pre-commit hook went to the backlog planner,
+    which produced a backlog of tasks to repair the harness instead of building
+    the project. Findings must reach the planner that owns them, or nobody.
+    """
+    blueprint = assemble(spec(), backlog(), skeleton())
+    review = ReviewReport(
+        findings=[
+            ReviewFinding(location="T-001", issue="weak check", evidence="e", fix="f", blocking=True),
+            ReviewFinding(location="R-001", issue="not delivered", evidence="e", fix="f", blocking=True),
+            ReviewFinding(location=".githooks/pre-commit", issue="malformed", evidence="e", fix="f", blocking=True),
+            ReviewFinding(location="checks/T-001.sh", issue="bad shebang", evidence="e", fix="f", blocking=True),
+            ReviewFinding(location="app/search.py", issue="wrong import", evidence="e", fix="f", blocking=True),
+            ReviewFinding(location="T-001", issue="cosmetic", evidence="e", fix="f", blocking=False),
+        ],
+        verdict="rejected",
+    )
+
+    plan, skel, template = _classify_feedback(review, blueprint)
+
+    assert "weak check" in plan and "not delivered" in plan
+    assert "malformed" not in plan, "harness bugs must never become backlog tasks"
+    assert "wrong import" in skel
+    assert "malformed" not in skel
+    assert len(template) == 2, "harness findings are reported, not fed back"
+    assert "cosmetic" not in plan, "only blocking findings drive regeneration"
+
+
+def test_template_findings_are_reported_as_our_bug_not_the_specs():
+    rejection = ReviewReport(
+        findings=[
+            ReviewFinding(
+                location=".githooks/pre-commit",
+                issue="malformed",
+                evidence="e",
+                fix="f",
+                blocking=True,
+            )
+        ],
+        verdict="rejected",
+    )
+    llm = FakeLLM(
+        {Backlog: [backlog()], SkeletonPlan: [skeleton()], ReviewReport: [rejection]}
+    )
+    result = generate(spec(), deps(llm))
+
+    assert not result.accepted
+    assert any("bug in Ouroboros itself" in note for note in result.blueprint.notes)

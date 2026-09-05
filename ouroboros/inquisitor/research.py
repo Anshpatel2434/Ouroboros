@@ -91,6 +91,7 @@ def research_stack(llm: LLM, stack: StackProfile) -> StackPlaybook:
         StackPlaybook,
         system=STACK_RESEARCH,
         user=f"Produce the stack playbook for:\n\n{described}",
+        role="research",
     )
 
 
@@ -203,5 +204,8 @@ def ensure_playbook(
         return None, False
 
     playbook = research_stack(llm, stack)
-    write_playbook_doc(playbook, root=root)
+    written = write_playbook_doc(playbook, root=root)
+    # Make it visible to this retriever immediately, or the next round misses
+    # again and pays for the same research twice.
+    retriever.register(written)
     return playbook, True

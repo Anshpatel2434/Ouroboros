@@ -72,10 +72,12 @@ def interviewed(client) -> str:
     return thread
 
 
-def test_health_reports_the_corpus(client):
+def test_health_reports_the_corpus_and_model(client):
     body = client.get("/api/health").json()
     assert body["status"] == "ok"
-    assert body["corpus_documents"] == 45
+    assert body["corpus_documents"] == len(FileCorpusRetriever())
+    assert body["provider"] in {"groq", "anthropic"}
+    assert body["model"]
 
 
 def test_interview_start_returns_questions(client):

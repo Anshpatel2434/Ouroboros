@@ -24,6 +24,20 @@ Three subsystems:
 database for the knowledge corpus — connection string not yet provided at time
 of writing, so the corpus is currently retrieved from files on disk.
 
+**Models:** provider-agnostic behind `ouroboros/llm/client.py`. Groq is the
+default (`openai/gpt-oss-120b`), Anthropic is supported when its key is present.
+Keys live in a gitignored `.env`; `.env.example` shows the shape. Two Groq
+constraints are designed around rather than worked around, both measured against
+the live API and both covered by tests:
+
+- Structured output must use `json_schema`; LangChain's default function-calling
+  path fails on schemas the size of `SpecDraft`. A rejected call's JSON is
+  salvaged from the error rather than re-requested.
+- The free tier allows 8,000 tokens per minute **including requested output**, so
+  `ouroboros/llm/budget.py` sets per-role output caps, trims prompts to what is
+  left, and paces requests through a rolling token bucket. Interviews take
+  minutes; that is the quota, not the code.
+
 ---
 
 ## 2. Current state of the repo
@@ -282,10 +296,15 @@ These came out of the corpus work and constrain the implementation:
 
 ## 7. Where to pick up
 
-1. **Run it against a live model.** Set `ANTHROPIC_API_KEY` and take one real
-   project through the whole flow. Everything is proven against a scripted LLM;
-   nothing has yet met a real one. Expect the interview prompts and the backlog
-   planner to need tuning after the first honest run.
+1. **Keep tuning the interview against live models.** `scripts/live_smoke.py`
+   runs a whole project through the product with a second model playing the
+   developer; it is the fastest way to find prompt problems. Several real bugs
+   came out of it already — a lint rule that refused legitimate angle-bracket
+   format specs, an interviewer that asked for the project name three rounds
+   running, an integrator that invented `pip` where the developer said `uv`, and
+   a stall where every required field was filled but no component had the paths
+   the scope fences need. Each fix has a regression test; expect more of the
+   same on new project types.
 2. **Revisit the generation quality gate.** v1 ships an LLM self-review as the
    only gate on generated repos, by the owner's decision. It cannot prove
    `verify.sh` runs — and the agent's first act is to run it in a loop. The seam

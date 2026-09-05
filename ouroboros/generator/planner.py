@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from ouroboros.corpus.retriever import FileCorpusRetriever
 from ouroboros.generator.prompts import BACKLOG_PLANNER, SKELETON_PLANNER
 from ouroboros.inquisitor.research import SkeletonFile, find_playbook
-from ouroboros.llm.client import LLM
+from ouroboros.llm.client import LLM, context_chars
 from ouroboros.models.blueprint import Backlog, Task
 from ouroboros.models.spec import ProjectSpec
 
@@ -22,15 +22,25 @@ class SkeletonPlan(BaseModel):
     notes: list[str] = Field(default_factory=list)
 
 
-def _stack_context(retriever: FileCorpusRetriever, spec: ProjectSpec) -> str:
-    """Whatever the corpus knows about this stack, verbatim where it matters."""
+def _stack_context(
+    retriever: FileCorpusRetriever, spec: ProjectSpec, role: str = "default"
+) -> str:
+    """Whatever the corpus knows about this stack, sized to the prompt budget."""
+    budget = context_chars(role)
+
     playbook = find_playbook(retriever, spec.stack)
     if playbook is not None:
-        return playbook.key_knowledge
+        return playbook.key_knowledge[:budget]
 
     query = f"{spec.stack.language} {spec.stack.framework or ''} {spec.stack.package_manager} test lint"
     hits = retriever.search(query, limit=3)
-    return "\n\n".join(f"### {h.document.title}\n{h.document.key_knowledge[:2000]}" for h in hits)
+    if not hits:
+        return "No corpus coverage for this stack."
+
+    per_hit = max(400, budget // len(hits))
+    return "\n\n".join(
+        f"### {h.document.title}\n{h.document.key_knowledge[:per_hit]}" for h in hits
+    )
 
 
 def _spec_context(spec: ProjectSpec) -> str:
@@ -62,11 +72,46 @@ def plan_backlog(
             f"Components and the paths they own (use these for scope fences):\n{component_map}\n\n"
             f"Verification available to every check script:\n"
             + "\n".join(f"- {label}: {cmd}" for label, cmd in spec.verification.commands())
-            + f"\n\nStack knowledge:\n{_stack_context(retriever, spec)[:6000]}"
+            + f"\n\nStack knowledge:\n{_stack_context(retriever, spec, 'backlog')}"
             + _feedback_block(feedback)
         ),
+        role="backlog",
     )
     return _normalize_backlog(backlog, spec)
+
+
+def _clean_check_script(body: str) -> str:
+    """Make a model-written check body safe to drop into our script template.
+
+    Live runs produced check scripts with a literal backslash-n instead of real
+    newlines, and with their own shebang and `set -euo pipefail` on top of the
+    ones the template already supplies — a duplicate shebang mid-file is a
+    syntax error, so the check could never run.
+    """
+    if not body:
+        return ""
+
+    script = body.strip()
+
+    # A body that is one long line of escaped newlines is unrunnable as-is.
+    if "\\n" in script and "\n" not in script.strip():
+        script = script.replace("\\n", "\n")
+    script = script.replace("\r\n", "\n")
+
+    lines = script.split("\n")
+    while lines:
+        head = lines[0].strip()
+        if (
+            head.startswith("#!")
+            or head.startswith("set -e")
+            or head.startswith("set -u")
+            or not head
+        ):
+            lines.pop(0)
+            continue
+        break
+
+    return "\n".join(lines).strip()
 
 
 def _normalize_backlog(backlog: Backlog, spec: ProjectSpec) -> Backlog:
@@ -92,6 +137,7 @@ def _normalize_backlog(backlog: Backlog, spec: ProjectSpec) -> Backlog:
                 update={
                     "id": task_id,
                     "scope_paths": scope,
+                    "check_script": _clean_check_script(task.check_script),
                     "status": "pending",
                     "attempts": 0,
                 }
@@ -123,7 +169,8 @@ def plan_skeleton(
             + "\n".join(f"- {label}: {cmd}" for label, cmd in spec.verification.commands())
             + f"\n\nComponents needing a home:\n{component_map}\n\n"
             f"Project: {spec.name} — {spec.one_line}\n\n"
-            f"Stack knowledge:\n{_stack_context(retriever, spec)[:6000]}"
+            f"Stack knowledge:\n{_stack_context(retriever, spec, 'skeleton')}"
             + _feedback_block(feedback)
         ),
+        role="skeleton",
     )

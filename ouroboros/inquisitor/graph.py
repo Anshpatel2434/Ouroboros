@@ -68,26 +68,98 @@ def _corpus_context(deps: InquisitorDeps, query: str, limit: int = 4) -> str:
 
 
 def _ask_prompt(state: InterviewState, deps: InquisitorDeps, findings_text: str = "") -> str:
+    from ouroboros.llm.budget import trim_to_tokens
+    from ouroboros.llm.client import limits_for
+
     draft = state.get("draft") or SpecDraft()
     asked = [t.question.text for t in state.get("transcript", [])]
-    parts = [
-        f"Project brief from the developer:\n{state.get('brief', '')}",
-        f"\nCurrent draft spec:\n{draft.model_dump_json(indent=2)}",
-        f"\nRequired fields still empty: {', '.join(draft.missing_fields()) or 'none'}",
-    ]
+    missing = draft.missing_fields()
+
+    # Settled fields go in as a short list rather than buried in the draft JSON.
+    # An early version passed only the JSON and the interviewer asked for the
+    # project name three rounds running: what is already known has to be
+    # impossible to miss.
+    settled = _settled_summary(draft)
+
+    parts = [f"Project brief from the developer:\n{state.get('brief', '')}"]
+
+    if settled:
+        parts.append(
+            "\nALREADY SETTLED — do not ask about any of these again:\n" + settled
+        )
+
+    if missing:
+        parts.append(
+            "\nSTILL MISSING — this round's agenda. Ask only about these:\n"
+            + "\n".join(f"- {field}" for field in missing)
+        )
+    elif not findings_text:
+        parts.append(
+            "\nEvery required field is filled. Ask only what would sharpen a "
+            "requirement that is still too vague to verify."
+        )
+
     if findings_text:
         parts.append(
             "\nThe ambiguity lint refuses to generate until these are resolved. "
-            "Ask the questions that resolve them:\n" + findings_text
+            "Ask the questions that resolve them — you must return at least one "
+            "question while any of these stand:\n" + findings_text
         )
+
+    # The draft is the biggest thing here and the least load-bearing now that
+    # the settled list carries the same information, so it is trimmed hardest.
+    draft_json, _ = trim_to_tokens(
+        draft.model_dump_json(indent=2),
+        int(limits_for().prompt_budget("questions") * 0.35),
+    )
+    parts.append(f"\nFull draft for reference:\n{draft_json}")
+
     if asked:
-        parts.append("\nAlready asked (do not repeat):\n" + "\n".join(f"- {q}" for q in asked))
+        recent = asked[-12:]
+        parts.append(
+            "\nQuestions already asked. Asking any of these again wastes the "
+            "developer's time:\n" + "\n".join(f"- {q}" for q in recent)
+        )
+
     parts.append(
         "\nRelevant harness-engineering guidance:\n"
         + _corpus_context(deps, state.get("brief", ""))
     )
     parts.append(f"\nAsk round {state.get('round', 0) + 1} of at most {deps.max_rounds}.")
     return "\n".join(parts)
+
+
+def _settled_summary(draft: SpecDraft) -> str:
+    """Compact list of what the interview has already established."""
+    lines: list[str] = []
+    for field in ("name", "slug", "one_line", "problem"):
+        value = getattr(draft, field, None)
+        if value:
+            lines.append(f"- {field}: {value}")
+    if draft.stack:
+        lines.append(
+            f"- stack: {draft.stack.language} {draft.stack.language_version}, "
+            f"framework={draft.stack.framework or 'none'}, "
+            f"package_manager={draft.stack.package_manager}, "
+            f"database={draft.stack.database or 'none'}"
+        )
+    if draft.verification:
+        commands = ", ".join(f"{k}={v}" for k, v in draft.verification.commands())
+        lines.append(f"- verification: {commands}")
+    if draft.success_criteria:
+        lines.append(f"- success_criteria: {len(draft.success_criteria)} recorded")
+    if draft.non_goals:
+        lines.append(f"- non_goals: {len(draft.non_goals)} recorded")
+    if draft.components:
+        lines.append(
+            "- components: " + ", ".join(c.name for c in draft.components)
+        )
+    if draft.requirements:
+        lines.append(
+            "- requirements: "
+            + ", ".join(f"{r.id} ({r.statement[:60]})" for r in draft.requirements)
+        )
+    return "\n".join(lines)
 
 
 def _findings_text(report: LintReport | None) -> str:
@@ -101,7 +173,7 @@ def _findings_text(report: LintReport | None) -> str:
 
 def open_interview(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
     batch = deps.llm.structured(
-        QuestionBatch, system=INTERVIEWER, user=_ask_prompt(state, deps)
+        QuestionBatch, system=INTERVIEWER, user=_ask_prompt(state, deps), role="questions"
     )
     return {
         "draft": state.get("draft") or SpecDraft(),
@@ -164,6 +236,7 @@ def integrate(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
             f"New answers:\n" + "\n\n".join(exchange_lines) +
             "\n\nReturn the complete updated draft."
         ),
+        role="draft",
     )
     return {"draft": updated, "transcript": turns, "answers": []}
 
@@ -223,7 +296,26 @@ def assess(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
         QuestionBatch,
         system=INTERVIEWER,
         user=_ask_prompt(state, deps, _findings_text(report)),
+        role="questions",
     )
+
+    if not batch.questions:
+        # The interviewer had nothing left to ask but the spec is still not
+        # clean. Stopping and saying so beats looping on an empty batch, which
+        # looks to a caller exactly like a finished interview.
+        return {
+            "lint": report,
+            "spec": None,
+            "status": "exhausted",
+            "pending": None,
+            "notices": list(state.get("notices", []))
+            + [
+                "The interviewer produced no further questions while the spec was "
+                f"still incomplete (missing: {', '.join(draft.missing_fields()) or 'nothing'}). "
+                "Generation stays refused."
+            ],
+        }
+
     return {
         "lint": report,
         "pending": batch,
