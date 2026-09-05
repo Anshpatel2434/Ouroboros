@@ -33,6 +33,7 @@ for stream in (sys.stdout, sys.stderr):
 from ouroboros.generator.build import GeneratorDeps, emit, generate  # noqa: E402
 from ouroboros.inquisitor.lint import lint_spec  # noqa: E402
 from ouroboros.llm.client import build_llm, describe_configuration  # noqa: E402
+from ouroboros.llm.usage import LEDGER, reset_usage  # noqa: E402
 from ouroboros.models.spec import (  # noqa: E402
     Component,
     ProjectSpec,
@@ -193,6 +194,7 @@ def main() -> int:
     print(f"\nspec: {spec.name} — {len(spec.requirements)} requirements, "
           f"{len(spec.components)} components")
 
+    reset_usage()
     started = time.time()
     print("\n=== GENERATION ===")
     result = generate(
@@ -200,6 +202,9 @@ def main() -> int:
     )
     print(f"review: {result.review.summary()} (attempts={result.attempts}) "
           f"in {time.time() - started:.0f}s")
+
+    print("\n=== BILLED TOKENS FOR GENERATION ===")
+    print(LEDGER.table())
     for finding in result.review.findings:
         flag = "BLOCK" if finding.blocking else "note "
         print(f"  {flag} [{finding.location}] {finding.issue}")

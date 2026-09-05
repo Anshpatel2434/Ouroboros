@@ -7,6 +7,8 @@ prompt plus max_tokens inside that budget.
 
 from __future__ import annotations
 
+import pytest
+
 
 from ouroboros.llm.budget import (
     ANTHROPIC_LIMITS,
@@ -143,3 +145,29 @@ def test_draft_role_can_carry_a_whole_spec():
 def test_every_role_still_leaves_room_for_a_real_prompt():
     for role in ("questions", "draft", "backlog", "skeleton", "review"):
         assert GROQ_LIMITS.prompt_budget(role) >= 512, role
+
+
+def test_dated_model_ids_resolve_to_a_price():
+    """Providers bill a dated id; exact-match lookup reported every run unpriced."""
+    from ouroboros.llm.usage import UsageLedger, price_for
+
+    assert price_for("gpt-4o-mini") is not None
+    assert price_for("gpt-4o-mini-2024-07-18") is not None
+    assert price_for("some-unknown-model") is None
+
+    ledger = UsageLedger()
+    ledger.record("questions", "gpt-4o-mini-2024-07-18", 1_000_000, 1_000_000)
+    assert ledger.cost == pytest.approx(0.15 + 0.60)
+    assert ledger.unpriced_models == set()
+
+
+def test_ledger_separates_roles_and_can_exclude_them():
+    from ouroboros.llm.usage import UsageLedger
+
+    ledger = UsageLedger()
+    ledger.record("questions", "gpt-4o-mini", 100, 10)
+    ledger.record("simulated_developer", "gpt-4o-mini", 500, 50)
+
+    assert ledger.total_tokens == 660
+    assert ledger.excluding("simulated_developer").total_tokens == 110
+    assert set(ledger.by_role()) == {"questions", "simulated_developer"}

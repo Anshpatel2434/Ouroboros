@@ -130,3 +130,20 @@ def test_daily_and_minute_limits_are_told_apart():
 
     assert _is_daily_limit(Exception(per_day))
     assert not _is_daily_limit(Exception("connection reset"))
+
+
+def test_structured_output_methods_are_ordered_per_provider():
+    """The two providers need opposite orderings, and both were measured.
+
+    Groq's function_calling fails on schemas the size of SpecDraft; OpenAI's
+    strict json_schema rejects the same schema because a dict-typed field cannot
+    satisfy its requirement that every property appear in `required`. Getting
+    this backwards fails the first interview round on either provider.
+    """
+    from ouroboros.llm.client import STRUCTURED_METHODS
+
+    assert STRUCTURED_METHODS["groq"][0] == "json_schema"
+    assert STRUCTURED_METHODS["openai"][0] == "function_calling"
+    for provider, methods in STRUCTURED_METHODS.items():
+        assert methods, provider
+        assert len(set(methods)) == len(methods), f"{provider} repeats a method"

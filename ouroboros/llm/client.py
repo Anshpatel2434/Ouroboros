@@ -20,6 +20,8 @@ from typing import Protocol, TypeVar
 
 from pydantic import BaseModel
 
+from langchain_core.callbacks import UsageMetadataCallbackHandler
+
 from ouroboros.llm.budget import (
     ANTHROPIC_LIMITS,
     GROQ_LIMITS,
@@ -29,6 +31,7 @@ from ouroboros.llm.budget import (
     estimate_tokens,
     trim_to_tokens,
 )
+from ouroboros.llm.usage import LEDGER
 
 T = TypeVar("T", bound=BaseModel)
 
@@ -84,9 +87,17 @@ PROVIDER_LIMITS = {
 # differently, so trying the second when the first breaks recovers a run that
 # would otherwise be lost. Anthropic's tool calling is fine and keeps the
 # library default.
+# Note the opposite ordering for the two providers, both measured:
+#   Groq   — json_schema first. function_calling fails on schemas the size of
+#            SpecDraft ("attempted to call too many tools" / "did not call a tool").
+#   OpenAI — function_calling first. Its json_schema mode is strict and rejects
+#            SpecDraft outright ("Extra required key 'glossary'"), because a
+#            dict-typed field cannot satisfy strict mode's requirement that every
+#            property be listed in `required`.
+# Anthropic's tool calling handles everything, so it keeps the library default.
 STRUCTURED_METHODS: dict[str, list[str | None]] = {
     "groq": ["json_schema", "function_calling"],
-    "openai": ["json_schema", "function_calling"],
+    "openai": ["function_calling", "json_schema"],
     "anthropic": [None],
 }
 
@@ -241,6 +252,16 @@ class StructuredChat:
     def _build(self, max_output_tokens: int):  # pragma: no cover
         raise NotImplementedError
 
+    def _record(self, role: str, meter) -> None:
+        """Write one call's billed tokens into the run ledger."""
+        for model_name, usage in (getattr(meter, "usage_metadata", None) or {}).items():
+            LEDGER.record(
+                role=role,
+                model=model_name,
+                input_tokens=int(usage.get("input_tokens", 0)),
+                output_tokens=int(usage.get("output_tokens", 0)),
+            )
+
     def _client(self, max_output_tokens: int):
         if max_output_tokens not in self._clients:
             self._clients[max_output_tokens] = self._build(max_output_tokens)
@@ -275,9 +296,11 @@ class StructuredChat:
 
             for attempt in range(RATE_LIMIT_RETRIES):
                 self.limiter.acquire(cost)
+                meter = UsageMetadataCallbackHandler()
                 try:
                     return model.invoke(
-                        [SystemMessage(content=system), HumanMessage(content=prompt)]
+                        [SystemMessage(content=system), HumanMessage(content=prompt)],
+                        config={"callbacks": [meter]},
                     )
                 except Exception as error:  # noqa: BLE001 - inspected below
                     last = error
@@ -301,6 +324,10 @@ class StructuredChat:
                         raise
                     # The quota resets on a rolling minute; wait it out.
                     time.sleep(min(2**attempt * 8, 60) + random.uniform(0, 2))
+                finally:
+                    # Record what the provider billed, including for the attempts
+                    # that failed — a retry costs real money and must show up.
+                    self._record(role, meter)
             raise last  # pragma: no cover - loop returns or raises
 
         try:
