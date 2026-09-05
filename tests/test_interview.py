@@ -219,3 +219,220 @@ def test_missing_fields_names_requirements_without_criteria():
 
 def test_complete_draft_reports_nothing_missing():
     assert complete_draft().missing_fields() == []
+
+
+def test_missing_fields_flags_blank_verification_commands():
+    """'verification is not None' is not the same as 'verification is usable'."""
+    draft = complete_draft()
+    draft.verification = VerificationPlan(install="", test="", smoke="")
+
+    missing = draft.missing_fields()
+    assert any("verification commands" in field for field in missing)
+    assert any("install" in field and "test" in field for field in missing)
+
+
+def test_settled_summary_lists_defined_glossary_terms():
+    """Terms already defined must be visible, or the interviewer re-asks them."""
+    from ouroboros.inquisitor.graph import _settled_summary
+
+    draft = complete_draft()
+    draft.glossary = {"malformed URL": "Cannot be parsed into scheme and netloc."}
+
+    assert "malformed URL" in _settled_summary(draft)
+
+
+def test_integrator_receives_outstanding_lint_findings(deps):
+    """Some findings can only be fixed by editing the spec, not by asking.
+
+    A live interview looped four rounds asking yes/no questions while the lint
+    repeated 'R-009 is redundant with R-006, remove it'. Only the integrator can
+    apply that, so it has to see the findings.
+    """
+    from ouroboros.inquisitor.lint import LintFinding, LintReport, Severity
+
+    llm = FakeLLM(
+        {
+            QuestionBatch: [batch("Anything else?")],
+            SpecDraft: [complete_draft()],
+            StackPlaybook: [playbook()],
+            SemanticReport: [SemanticReport(findings=[])],
+        }
+    )
+    state = {
+        "draft": complete_draft(),
+        "pending": batch("Anything else?"),
+        "answers": [{"question_id": "q1", "value": "Yes."}],
+        "transcript": [],
+        "lint": LintReport(
+            findings=[
+                LintFinding(
+                    code="COVERAGE_HOLE",
+                    severity=Severity.ERROR,
+                    location="requirements",
+                    evidence="R-009 is redundant with R-006.",
+                    rectification="Remove R-009 or clarify what it adds.",
+                )
+            ]
+        ),
+    }
+
+    from ouroboros.inquisitor.graph import integrate
+
+    integrate(state, deps(llm))
+
+    prompt = [user for schema, user in llm.calls if schema is SpecDraft][0]
+    assert "R-009 is redundant" in prompt
+    assert "remove, merge, or restructure" in prompt
+
+
+def test_integrator_prompt_stays_clean_when_the_lint_is_happy(deps):
+    llm = FakeLLM(
+        {SpecDraft: [complete_draft()], StackPlaybook: [playbook()]}
+    )
+    state = {
+        "draft": complete_draft(),
+        "pending": batch("Anything else?"),
+        "answers": [{"question_id": "q1", "value": "Yes."}],
+        "transcript": [],
+        "lint": None,
+    }
+
+    from ouroboros.inquisitor.graph import integrate
+
+    integrate(state, deps(llm))
+    prompt = [user for schema, user in llm.calls if schema is SpecDraft][0]
+    assert "refusing for these reasons" not in prompt
+
+
+# --------------------------------------------------------------------------- #
+# Draft merging — an omission must never be a deletion
+# --------------------------------------------------------------------------- #
+
+def test_merge_keeps_fields_the_model_omitted():
+    """A live interview regressed to asking the project name again at round 5.
+
+    The integrator returns the whole draft each round, so anything it forgets
+    used to be deleted outright.
+    """
+    before = complete_draft()
+    forgetful = SpecDraft(problem="A sharper problem statement.")
+
+    after = before.merged_with(forgetful)
+
+    assert after.problem == "A sharper problem statement.", "real edits must land"
+    assert after.name == before.name
+    assert after.one_line == before.one_line
+    assert after.stack.language == "Python"
+    assert after.verification.test == "pytest -q"
+    assert after.components == before.components
+    assert after.requirements == before.requirements
+    assert after.success_criteria == before.success_criteria
+
+
+def test_merge_still_allows_real_edits():
+    """Removing a redundant requirement has to remain possible."""
+    before = complete_draft()
+    before.requirements = [
+        Requirement(id="R-001", statement="Keep.", acceptance_criteria=["ok"]),
+        Requirement(id="R-002", statement="Redundant.", acceptance_criteria=["ok"]),
+    ]
+    update = SpecDraft(
+        requirements=[Requirement(id="R-001", statement="Keep.", acceptance_criteria=["ok"])]
+    )
+
+    after = before.merged_with(update)
+    assert [r.id for r in after.requirements] == ["R-001"]
+
+
+def test_merge_accumulates_glossary_terms():
+    before = complete_draft()
+    before.glossary = {"link": "A URL in a markdown file."}
+    update = SpecDraft(glossary={"hit": "One matching line."})
+
+    after = before.merged_with(update)
+    assert set(after.glossary) == {"link", "hit"}
+
+
+def test_merge_fills_blank_verification_commands_from_the_previous_draft():
+    before = complete_draft()
+    update = SpecDraft(verification=VerificationPlan(install="", test="uv run pytest"))
+
+    after = before.merged_with(update)
+    assert after.verification.install == "uv sync", "a blank must not erase a real command"
+    assert after.verification.test == "uv run pytest"
+
+
+def test_merge_preserves_researched_stack_coverage():
+    """Gap research sets this; the model has no way to know it should stay true."""
+    before = complete_draft()
+    before.stack.corpus_covered = True
+    update = SpecDraft(stack=StackProfile(
+        language="Python", language_version="3.12", package_manager="uv"
+    ))
+
+    assert before.merged_with(update).stack.corpus_covered is True
+
+
+def test_integrate_merges_instead_of_replacing(deps):
+    llm = FakeLLM(
+        {
+            SpecDraft: [SpecDraft(problem="Only this field came back.")],
+            StackPlaybook: [playbook()],
+        }
+    )
+    state = {
+        "draft": complete_draft(),
+        "pending": batch("What is the problem?"),
+        "answers": [{"question_id": "q1", "value": "Chasing invoices."}],
+        "transcript": [],
+        "lint": None,
+    }
+
+    from ouroboros.inquisitor.graph import integrate
+
+    result = integrate(state, deps(llm))
+    assert result["draft"].problem == "Only this field came back."
+    assert result["draft"].name == "Invoice Tracker", "the rest must survive"
+
+
+def test_flattened_requirements_are_repaired():
+    """gpt-4o-mini intermittently flattens objects into alternating key/value items.
+
+    Pydantic rejects it and the whole round dies, losing answers the developer
+    already gave. The shape is unambiguous, so it is rebuilt.
+    """
+    draft = SpecDraft.model_validate(
+        {
+            "requirements": [
+                "id", "R-001", "statement", "Count words.",
+                "acceptance_criteria", ["Prints 10 lines."], "priority", "must",
+                "id", "R-002", "statement", "Support --top.",
+                "acceptance_criteria", ["Prints N lines."], "priority", "must",
+            ]
+        }
+    )
+
+    assert [r.id for r in draft.requirements] == ["R-001", "R-002"]
+    assert draft.requirements[0].statement == "Count words."
+    assert draft.requirements[1].acceptance_criteria == ["Prints N lines."]
+
+
+def test_flattened_components_are_repaired():
+    draft = SpecDraft.model_validate(
+        {"components": ["name", "cli", "responsibility", "Parses args.", "paths", ["src/cli.py"]]}
+    )
+    assert draft.components[0].name == "cli"
+    assert draft.components[0].paths == ["src/cli.py"]
+
+
+def test_wellformed_lists_are_untouched():
+    draft = SpecDraft.model_validate(
+        {"requirements": [{"id": "R-001", "statement": "Do it.", "acceptance_criteria": ["ok"]}]}
+    )
+    assert draft.requirements[0].id == "R-001"
+
+
+def test_unrecognised_shapes_are_left_for_pydantic_to_reject():
+    """Repair must not paper over genuinely wrong data."""
+    with pytest.raises(Exception):
+        SpecDraft.model_validate({"requirements": ["totally", "unrelated", "strings"]})

@@ -159,6 +159,8 @@ def _settled_summary(draft: SpecDraft) -> str:
             "- requirements: "
             + ", ".join(f"{r.id} ({r.statement[:60]})" for r in draft.requirements)
         )
+    if draft.glossary:
+        lines.append("- glossary defines: " + ", ".join(sorted(draft.glossary)))
     return "\n".join(lines)
 
 
@@ -228,17 +230,35 @@ def integrate(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
         turns.append(InterviewTurn(question=question, answer=answer["value"]))
         exchange_lines.append(f"Q: {question.text}\nA: {answer['value']}")
 
+    # Findings whose fix is a spec edit — a redundant requirement, a duplicated
+    # statement — cannot be resolved by asking the developer anything. A live
+    # interview looped for four rounds asking yes/no questions while the lint
+    # kept repeating "R-009 is redundant with R-006, remove it". The integrator
+    # is the only step that can actually apply that fix, so it sees them too.
+    outstanding = _findings_text(state.get("lint"))
+    structural_note = (
+        "\n\nThe ambiguity lint is currently refusing for these reasons. Where a "
+        "finding asks you to remove, merge, or restructure something in the spec, "
+        "DO IT NOW as part of this update — those cannot be fixed by asking the "
+        "developer another question. Where it asks for information you do not "
+        "have, leave it alone; it will be asked.\n" + outstanding
+        if outstanding
+        else ""
+    )
+
     updated = deps.llm.structured(
         SpecDraft,
         system=INTEGRATOR,
         user=(
             f"Current draft:\n{draft.model_dump_json(indent=2)}\n\n"
             f"New answers:\n" + "\n\n".join(exchange_lines) +
+            structural_note +
             "\n\nReturn the complete updated draft."
         ),
         role="draft",
     )
-    return {"draft": updated, "transcript": turns, "answers": []}
+    # Fold rather than replace: an omitted field means "unchanged", not "deleted".
+    return {"draft": draft.merged_with(updated), "transcript": turns, "answers": []}
 
 
 def ensure_stack_coverage(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:

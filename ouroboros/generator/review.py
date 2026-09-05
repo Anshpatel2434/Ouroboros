@@ -132,8 +132,76 @@ def structural_findings(blueprint: RepoBlueprint) -> list[ReviewFinding]:
             )
         )
 
+    findings.extend(_skeleton_completeness_findings(blueprint))
     findings.extend(_manifest_findings(blueprint))
     findings.extend(_undeclared_import_findings(blueprint))
+    return findings
+
+
+# The manifest each package manager needs before `install` can do anything.
+EXPECTED_MANIFEST = {
+    "uv": "pyproject.toml",
+    "pip": "pyproject.toml",
+    "poetry": "pyproject.toml",
+    "hatch": "pyproject.toml",
+    "pdm": "pyproject.toml",
+    "npm": "package.json",
+    "pnpm": "package.json",
+    "yarn": "package.json",
+    "bun": "package.json",
+    "cargo": "Cargo.toml",
+    "go": "go.mod",
+}
+
+
+def _skeleton_completeness_findings(blueprint: RepoBlueprint) -> list[ReviewFinding]:
+    """The skeleton must actually satisfy the commands verify.sh will run.
+
+    The earlier manifest checks only fire when a manifest exists, so a run that
+    emitted a skeleton of one lone module — no pyproject.toml, no package entry
+    point, no tests — passed review untouched while verify.sh was set to run
+    `uv sync` and `uv run pytest -q`. Neither could have worked. Absence is as
+    checkable as malformedness, and just as fatal.
+    """
+    findings: list[ReviewFinding] = []
+    paths = set(blueprint.paths())
+    manager = blueprint.spec.stack.package_manager.strip().lower()
+
+    manifest = EXPECTED_MANIFEST.get(manager)
+    if manifest and not any(p == manifest or p.endswith(f"/{manifest}") for p in paths):
+        findings.append(
+            ReviewFinding(
+                location=manifest,
+                issue=f"No {manifest} in the generated repo.",
+                evidence=f"The stack uses {manager}, and "
+                f"`{blueprint.spec.verification.install}` needs {manifest}.",
+                fix=f"Emit a {manifest} declaring the project and its dependencies. "
+                "Without it the install command does nothing and every later "
+                "command fails.",
+                blocking=True,
+            )
+        )
+
+    # A test command with nothing to run is a feedback loop that always passes.
+    if blueprint.spec.verification.test:
+        has_tests = any(
+            "test" in p.rsplit("/", 1)[-1].lower() or p.startswith(("tests/", "test/"))
+            for p in paths
+            if not p.startswith("checks/")
+        )
+        if not has_tests:
+            findings.append(
+                ReviewFinding(
+                    location="tests/",
+                    issue="The skeleton contains no tests.",
+                    evidence=f"verify.sh runs `{blueprint.spec.verification.test}` but "
+                    "the repo has no test file.",
+                    fix="Emit at least one real passing test. A test command with "
+                    "nothing to run gives the agent a green light it did not earn.",
+                    blocking=True,
+                )
+            )
+
     return findings
 
 
@@ -177,10 +245,19 @@ def _undeclared_import_findings(blueprint: RepoBlueprint) -> list[ReviewFinding]
                 name = re.split(r"[<>=!~\[; ]", requirement.strip(), maxsplit=1)[0]
                 declared.add(name.lower().replace("-", "_"))
 
-    # The project's own package is importable without being a dependency.
+    # The project's own packages are importable without being dependencies, and
+    # the package directory is often named differently from the project slug, so
+    # they are read from the emitted files rather than guessed from the name.
     own = {blueprint.spec.slug.replace("-", "_").lower()}
     if parsed.get("project", {}).get("name"):
         own.add(str(parsed["project"]["name"]).replace("-", "_").lower())
+
+    for generated in blueprint.files:
+        parts = generated.path.split("/")
+        if parts[-1] == "__init__.py" and len(parts) >= 2:
+            own.add(parts[-2].lower())
+        elif len(parts) == 1 and parts[0].endswith(".py"):
+            own.add(parts[0][:-3].lower())
 
     imported: dict[str, str] = {}
     for generated in blueprint.files:

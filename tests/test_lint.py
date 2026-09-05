@@ -179,3 +179,30 @@ def test_angle_bracket_format_specs_are_not_placeholders():
 def test_instructional_placeholders_are_still_caught():
     for text in ("Set <your-api-key> in the env.", "Handle TBD cases.", "Use <insert value>."):
         assert "PLACEHOLDER" in codes(clean_spec(problem=text)), text
+
+
+def test_empty_verification_commands_block_generation():
+    """A live interview produced a verification object of empty strings.
+
+    Every required field was "present", the agenda reported nothing missing, and
+    the lint passed — so the generated verify.sh would have had no steps at all
+    and the agent's feedback loop would always succeed.
+    """
+    spec = clean_spec(verification=VerificationPlan(install="", test="", lint="", smoke=""))
+    report = lint_spec(spec)
+
+    assert not report.passed, "a spec with no verification commands must be refused"
+    codes = {f.code for f in report.errors}
+    assert "MISSING_VERIFICATION_COMMAND" in codes
+
+
+def test_each_required_verification_command_is_named():
+    spec = clean_spec(verification=VerificationPlan(install="uv sync", test="   "))
+    errors = {f.location for f in lint_spec(spec).errors}
+    assert "verification.test" in errors
+    assert "verification.install" not in errors
+
+
+def test_optional_commands_may_be_absent():
+    spec = clean_spec(verification=VerificationPlan(install="uv sync", test="pytest -q"))
+    assert lint_spec(spec).passed

@@ -56,7 +56,17 @@ has not named a package manager, do not pick one for them. A guessed `pip` \
 where they meant `uv` produces a repository whose every command is wrong.
 - Never drop something you already recorded. You are returning the whole draft, \
 so anything you omit is deleted. Carry every earlier field forward verbatim \
-unless the new answers changed it.
+unless the new answers changed it. This applies to `glossary` and `non_goals` as \
+much as to requirements — they are easy to forget and the lint refuses without them.
+- When an answer explains what a term MEANS, write it into `glossary` as a \
+term-to-definition entry. The lint blocks generation while a term used in a \
+requirement has no definition, so an answer that defines something and is not \
+recorded causes the interviewer to ask the very same question again. Repeating a \
+question the developer already answered is the most visible way this system can \
+waste someone's time.
+- The verification commands are required, not optional. Never emit empty strings \
+for `install` or `test`; if the developer has not given them, leave the whole \
+`verification` object null so the interview knows to ask.
 - Acceptance criteria must be observable by a script: a status code, an exact \
 output, a file that exists, a threshold with a number. "Works correctly" is not \
 an acceptance criterion.

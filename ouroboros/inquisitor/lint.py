@@ -218,10 +218,35 @@ def _check_requirements(spec: ProjectSpec) -> list[LintFinding]:
 
 
 def _check_verification(spec: ProjectSpec) -> list[LintFinding]:
-    """The agent's whole feedback loop is these commands. They must be real."""
+    """The agent's whole feedback loop is these commands. They must be real.
+
+    Checked against the raw fields, not `commands()`. That helper filters empty
+    values so `verify.sh` never renders a blank step — which meant a spec whose
+    install and test were both empty strings produced an empty command list and
+    sailed through this check. A live interview did exactly that: every required
+    field was "present", and the generated verify.sh would have had no steps at
+    all, leaving the agent with a feedback loop that always passes.
+    """
     findings: list[LintFinding] = []
-    for label, command in spec.verification.commands():
-        if len(command.strip()) < 2:
+
+    for label in ("install", "test"):
+        command = (getattr(spec.verification, label) or "").strip()
+        if len(command) < 2:
+            findings.append(
+                LintFinding(
+                    code="MISSING_VERIFICATION_COMMAND",
+                    severity=Severity.ERROR,
+                    location=f"verification.{label}",
+                    evidence=f"'{label}' is empty.",
+                    rectification=f"Provide the real {label} command for this stack. "
+                    "verify.sh is built from these, and without them the agent has "
+                    "nothing to check its work against.",
+                )
+            )
+
+    for label in ("lint", "typecheck", "build", "smoke"):
+        command = getattr(spec.verification, label)
+        if command is not None and 0 < len(command.strip()) < 2:
             findings.append(
                 LintFinding(
                     code="EMPTY_VERIFICATION_COMMAND",

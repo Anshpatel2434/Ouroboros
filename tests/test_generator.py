@@ -80,8 +80,18 @@ def backlog() -> Backlog:
 
 
 def skeleton() -> SkeletonPlan:
+    """A complete skeleton: manifest, package, and a passing test.
+
+    Anything less is refused by the completeness checks, which is the point —
+    a real run once emitted a single module with no manifest and passed review.
+    """
     return SkeletonPlan(
         files=[
+            SkeletonFile(
+                path="pyproject.toml",
+                purpose="Dependency manifest.",
+                contents='[project]\nname = "invoice-tracker"\nversion = "0.1.0"\ndependencies = []\n',
+            ),
             SkeletonFile(path="app/__init__.py", purpose="Package root.", contents=""" """),
             SkeletonFile(
                 path="tests/test_smoke.py",
@@ -677,3 +687,59 @@ def test_stdlib_and_own_package_imports_are_not_flagged():
     )
     findings = [f for f in structural_findings(assemble(spec(), backlog(), plan)) if f.blocking]
     assert not [f for f in findings if "imports" in f.issue]
+
+
+def test_missing_manifest_blocks_generation():
+    """A run emitted a skeleton of one module and review passed it.
+
+    No pyproject.toml, no tests, while verify.sh ran `uv sync` and pytest.
+    Absence is as checkable as malformedness, and just as fatal.
+    """
+    sparse = SkeletonPlan(
+        files=[SkeletonFile(path="src/app/searcher.py", purpose="lone module", contents="def search():\n    return []\n")]
+    )
+    findings = [f for f in structural_findings(assemble(spec(), backlog(), sparse)) if f.blocking]
+    issues = {f.issue for f in findings}
+
+    assert "No pyproject.toml in the generated repo." in issues
+    assert "The skeleton contains no tests." in issues
+
+
+def test_node_project_expects_package_json():
+    node = spec(
+        stack=StackProfile(
+            language="TypeScript", language_version="5.7", package_manager="pnpm",
+            corpus_covered=True,
+        )
+    )
+    sparse = SkeletonPlan(files=[SkeletonFile(path="src/index.ts", purpose="entry", contents="export {};\n")])
+    issues = {f.issue for f in structural_findings(assemble(node, backlog(), sparse)) if f.blocking}
+    assert "No package.json in the generated repo." in issues
+
+
+def test_complete_skeleton_passes_completeness_checks():
+    complete = SkeletonPlan(
+        files=[
+            SkeletonFile(path="pyproject.toml", purpose="manifest", contents='[project]\nname = "app"\nversion = "0.1.0"\ndependencies = []\n'),
+            SkeletonFile(path="src/app/__init__.py", purpose="package", contents=""),
+            SkeletonFile(path="tests/test_smoke.py", purpose="baseline", contents="def test_ok():\n    assert True\n"),
+        ]
+    )
+    findings = [f for f in structural_findings(assemble(spec(), backlog(), complete)) if f.blocking]
+    assert not findings, [f.issue for f in findings]
+
+
+def test_unknown_package_manager_is_not_second_guessed():
+    """We only assert a manifest for managers we actually know."""
+    exotic = spec(
+        stack=StackProfile(
+            language="Elixir", language_version="1.17", package_manager="mix",
+            corpus_covered=True,
+        )
+    )
+    plan = SkeletonPlan(files=[
+        SkeletonFile(path="lib/app.ex", purpose="module", contents="defmodule App do\nend\n"),
+        SkeletonFile(path="test/app_test.exs", purpose="test", contents="defmodule AppTest do\nend\n"),
+    ])
+    issues = {f.issue for f in structural_findings(assemble(exotic, backlog(), plan)) if f.blocking}
+    assert not any("manifest" in i or "No " in i for i in issues), issues
