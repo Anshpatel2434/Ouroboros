@@ -76,7 +76,7 @@ def test_health_reports_the_corpus_and_model(client):
     body = client.get("/api/health").json()
     assert body["status"] == "ok"
     assert body["corpus_documents"] == len(FileCorpusRetriever())
-    assert body["provider"] in {"groq", "anthropic"}
+    assert body["provider"] in {"groq", "openai", "anthropic"}
     assert body["model"]
 
 

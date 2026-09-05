@@ -104,6 +104,13 @@ ANTHROPIC_LIMITS = ProviderLimits(
     tokens_per_minute=None, max_prompt_tokens=120_000, max_output_tokens=8192
 )
 
+# Measured on this account: 150M tokens/minute and 30k requests/minute, so the
+# per-minute budget is not a real constraint either. The output ceiling is set
+# by gpt-4o-mini's 16k completion limit, kept below it for headroom.
+OPENAI_LIMITS = ProviderLimits(
+    tokens_per_minute=None, max_prompt_tokens=100_000, max_output_tokens=12_000
+)
+
 
 class TokenRateLimiter:
     """A rolling-minute token bucket, shared across threads.

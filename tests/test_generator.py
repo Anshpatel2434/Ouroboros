@@ -16,7 +16,7 @@ from ouroboros.generator.build import (
     emit,
     generate,
 )
-from ouroboros.generator.planner import SkeletonPlan, _normalize_backlog
+from ouroboros.generator.planner import SkeletonPlan, _normalize_backlog, plan_backlog
 from ouroboros.generator.review import ReviewFinding, ReviewReport, structural_findings
 from ouroboros.inquisitor.research import SkeletonFile
 from ouroboros.models.blueprint import Backlog, Task
@@ -445,3 +445,235 @@ def test_template_findings_are_reported_as_our_bug_not_the_specs():
 
     assert not result.accepted
     assert any("bug in Ouroboros itself" in note for note in result.blueprint.notes)
+
+
+def test_backlog_is_planned_in_chunks_for_a_large_spec():
+    """One call for a whole backlog is fragile.
+
+    A live run produced three tasks covering none of eight requirements, and a
+    weaker model returned nothing valid at all. Requirements are planned a few
+    at a time so each response stays small and none can be forgotten.
+    """
+    requirements = [
+        Requirement(id=f"R-{n:03d}", statement=f"Do thing {n}.", acceptance_criteria=[f"Thing {n} happens."])
+        for n in range(1, 8)
+    ]
+    big = spec(requirements=requirements)
+
+    responses = [
+        Backlog(
+            tasks=[
+                Task(
+                    id=f"T-{n:03d}",
+                    title=f"Implement thing {n}",
+                    requirement_id=f"R-{n:03d}",
+                    intent="x",
+                    scope_paths=["app/"],
+                    done_when=[f"Thing {n} happens."],
+                    check_script="exit 0",
+                )
+                for n in group
+            ]
+        )
+        for group in ([1, 2, 3], [4, 5, 6], [7])
+    ]
+    llm = FakeLLM({Backlog: responses})
+
+    result = plan_backlog(llm, FileCorpusRetriever(), big)
+
+    assert llm.count(Backlog) == 3, "seven requirements must not be one call"
+    assert len(result.tasks) == 7
+    assert {t.requirement_id for t in result.tasks} == {r.id for r in requirements}
+
+
+def test_small_spec_is_planned_in_one_call():
+    llm = FakeLLM({Backlog: [backlog()]})
+    plan_backlog(llm, FileCorpusRetriever(), spec())
+    assert llm.count(Backlog) == 1
+
+
+def test_later_chunks_are_told_what_was_already_planned():
+    """Cross-chunk dependencies are only expressible if later calls can see earlier ids."""
+    requirements = [
+        Requirement(id=f"R-{n:03d}", statement=f"Do thing {n}.", acceptance_criteria=["It happens."])
+        for n in range(1, 8)
+    ]
+    responses = [
+        Backlog(tasks=[Task(id=f"T-{n:03d}", title=f"Task {n}", requirement_id=f"R-{n:03d}", intent="x", scope_paths=["app/"])])
+        for n in (1, 2, 3)
+    ]
+    llm = FakeLLM({Backlog: responses})
+    plan_backlog(llm, FileCorpusRetriever(), spec(requirements=requirements))
+
+    second_prompt = [u for s, u in llm.calls if s is Backlog][1]
+    assert "already planned" in second_prompt
+    assert "T-001" in second_prompt
+
+
+def test_broken_python_manifest_is_caught_deterministically():
+    """The exact manifest a live run produced, which the critic passed.
+
+    Metadata under [tool], dependencies under [tool.poetry], in a uv project:
+    valid TOML, plausible to read, and nothing installs from it. verify.sh could
+    not have succeeded, so this must block.
+    """
+    broken = SkeletonPlan(
+        files=[
+            SkeletonFile(
+                path="pyproject.toml",
+                purpose="manifest",
+                contents=(
+                    '[tool]\nname = "noteseek"\nversion = "0.1.0"\n\n'
+                    '[tool.poetry.dependencies]\npython = "^3.12"\nclick = "^8.0"\n'
+                ),
+            )
+        ]
+    )
+    findings = structural_findings(assemble(spec(), backlog(), broken))
+    issues = {f.issue for f in findings if f.blocking}
+
+    assert "pyproject.toml has no [project] table." in issues
+    assert any("Poetry" in issue for issue in issues)
+
+
+def test_valid_python_manifest_passes():
+    good = SkeletonPlan(
+        files=[
+            SkeletonFile(
+                path="pyproject.toml",
+                purpose="manifest",
+                contents=(
+                    '[project]\nname = "noteseek"\nversion = "0.1.0"\n'
+                    'dependencies = ["click"]\n\n'
+                    '[project.scripts]\nnoteseek = "noteseek.cli:main"\n'
+                ),
+            )
+        ]
+    )
+    findings = [f for f in structural_findings(assemble(spec(), backlog(), good)) if f.blocking]
+    assert not [f for f in findings if "pyproject" in f.location]
+
+
+def test_unparseable_manifest_is_caught():
+    for path, contents in [
+        ("pyproject.toml", "[project\nname = broken"),
+        ("package.json", '{"name": "x",}'),
+    ]:
+        plan = SkeletonPlan(files=[SkeletonFile(path=path, purpose="manifest", contents=contents)])
+        findings = structural_findings(assemble(spec(), backlog(), plan))
+        assert any(f.blocking and path in f.location for f in findings), path
+
+
+def test_pep621_dependency_table_is_caught():
+    """[project] existing is not enough; its shape has to be installable.
+
+    A live run declared dependencies as a table of Poetry-style constraints and
+    listed sqlite3 — a stdlib module with no distribution to install.
+    """
+    plan = SkeletonPlan(
+        files=[
+            SkeletonFile(
+                path="pyproject.toml",
+                purpose="manifest",
+                contents=(
+                    '[project]\nname = "noteseek"\nversion = "0.1.0"\n'
+                    'authors = ["Someone <a@b.c>"]\n\n'
+                    '[project.dependencies]\nclick = "^8.0"\nsqlite3 = "^3.36"\n'
+                ),
+            )
+        ]
+    )
+    issues = {f.issue for f in structural_findings(assemble(spec(), backlog(), plan)) if f.blocking}
+
+    assert "project.dependencies is not an array." in issues
+    assert "project.authors has the wrong shape." in issues
+
+
+def test_stdlib_dependency_is_caught():
+    plan = SkeletonPlan(
+        files=[
+            SkeletonFile(
+                path="pyproject.toml",
+                purpose="manifest",
+                contents=(
+                    '[project]\nname = "noteseek"\nversion = "0.1.0"\n'
+                    'dependencies = ["click>=8.0", "sqlite3>=3.36"]\n'
+                ),
+            )
+        ]
+    )
+    issues = {f.issue for f in structural_findings(assemble(spec(), backlog(), plan)) if f.blocking}
+    assert any("standard library" in issue for issue in issues)
+
+
+def test_wellformed_pep621_manifest_passes():
+    plan = SkeletonPlan(
+        files=[
+            SkeletonFile(
+                path="pyproject.toml",
+                purpose="manifest",
+                contents=(
+                    '[project]\nname = "noteseek"\nversion = "0.1.0"\n'
+                    'requires-python = ">=3.12"\n'
+                    'dependencies = ["click>=8.0"]\n'
+                    'authors = [{name = "A", email = "a@example.com"}]\n\n'
+                    '[project.scripts]\nnoteseek = "noteseek.cli:main"\n'
+                ),
+            )
+        ]
+    )
+    findings = [f for f in structural_findings(assemble(spec(), backlog(), plan)) if f.blocking]
+    assert not [f for f in findings if "pyproject" in f.location]
+
+
+def _skeleton_with(manifest: str, module: str) -> SkeletonPlan:
+    return SkeletonPlan(
+        files=[
+            SkeletonFile(path="pyproject.toml", purpose="manifest", contents=manifest),
+            SkeletonFile(path="src/app/cli.py", purpose="cli", contents=module),
+        ]
+    )
+
+
+def test_undeclared_third_party_import_is_caught():
+    """The manifest and the code come from separate calls, so they drift.
+
+    A live run produced a cli.py importing click next to `dependencies = []`.
+    Each file is fine alone; together nothing installs and the smoke command
+    dies on ImportError.
+    """
+    plan = _skeleton_with(
+        '[project]\nname = "invoice-tracker"\nversion = "0.1.0"\ndependencies = []\n',
+        "import click\n\ndef main():\n    click.echo('hi')\n",
+    )
+    findings = [f for f in structural_findings(assemble(spec(), backlog(), plan)) if f.blocking]
+    assert any("imports 'click'" in f.issue for f in findings)
+
+
+def test_declared_import_passes():
+    plan = _skeleton_with(
+        '[project]\nname = "invoice-tracker"\nversion = "0.1.0"\n'
+        'dependencies = ["click>=8.0"]\n',
+        "import click\n\ndef main():\n    click.echo('hi')\n",
+    )
+    findings = [f for f in structural_findings(assemble(spec(), backlog(), plan)) if f.blocking]
+    assert not any("click" in f.issue for f in findings)
+
+
+def test_dev_group_dependency_counts_as_declared():
+    plan = _skeleton_with(
+        '[project]\nname = "invoice-tracker"\nversion = "0.1.0"\ndependencies = []\n\n'
+        '[dependency-groups]\ndev = ["pytest>=8.0"]\n',
+        "import pytest\n",
+    )
+    findings = [f for f in structural_findings(assemble(spec(), backlog(), plan)) if f.blocking]
+    assert not any("pytest" in f.issue for f in findings)
+
+
+def test_stdlib_and_own_package_imports_are_not_flagged():
+    plan = _skeleton_with(
+        '[project]\nname = "invoice-tracker"\nversion = "0.1.0"\ndependencies = []\n',
+        "import sqlite3\nimport json\nfrom invoice_tracker import cli\n",
+    )
+    findings = [f for f in structural_findings(assemble(spec(), backlog(), plan)) if f.blocking]
+    assert not [f for f in findings if "imports" in f.issue]

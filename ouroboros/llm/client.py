@@ -5,10 +5,9 @@ for an instance of a Pydantic schema, get one back or raise. Keeping it small
 means the interview, the semantic lint, gap research and the self-review all
 share one path for retries, schema repair, prompt trimming and rate pacing.
 
-Two providers are supported. Groq is the default because it is what this project
-runs on; Anthropic is kept because the prompts were written against it and it is
-the better critic when a key is available. Selection is by environment, never
-hardcoded at a call site.
+Three providers are supported: OpenAI, Groq and Anthropic. Selection is by
+environment, never hardcoded at a call site, so the same code runs against a
+generous paid quota or a tight free tier without changes elsewhere.
 """
 
 from __future__ import annotations
@@ -24,6 +23,7 @@ from pydantic import BaseModel
 from ouroboros.llm.budget import (
     ANTHROPIC_LIMITS,
     GROQ_LIMITS,
+    OPENAI_LIMITS,
     ProviderLimits,
     TokenRateLimiter,
     estimate_tokens,
@@ -58,6 +58,11 @@ PROVIDER_MODELS = {
         "critic": "openai/gpt-oss-120b",
         "fast": "openai/gpt-oss-20b",
     },
+    "openai": {
+        "default": "gpt-4o-mini",
+        "critic": "gpt-4o-mini",
+        "fast": "gpt-4o-mini",
+    },
     "anthropic": {
         "default": "claude-sonnet-5",
         "critic": "claude-opus-5",
@@ -65,7 +70,11 @@ PROVIDER_MODELS = {
     },
 }
 
-PROVIDER_LIMITS = {"groq": GROQ_LIMITS, "anthropic": ANTHROPIC_LIMITS}
+PROVIDER_LIMITS = {
+    "groq": GROQ_LIMITS,
+    "openai": OPENAI_LIMITS,
+    "anthropic": ANTHROPIC_LIMITS,
+}
 
 # How each provider is asked for structured output, in fallback order. Measured,
 # not assumed: on Groq, LangChain's default function-calling path fails on
@@ -77,6 +86,7 @@ PROVIDER_LIMITS = {"groq": GROQ_LIMITS, "anthropic": ANTHROPIC_LIMITS}
 # library default.
 STRUCTURED_METHODS: dict[str, list[str | None]] = {
     "groq": ["json_schema", "function_calling"],
+    "openai": ["json_schema", "function_calling"],
     "anthropic": [None],
 }
 
@@ -103,7 +113,7 @@ class LLM(Protocol):
 
 
 def active_provider() -> str:
-    """Groq when its key is present, Anthropic otherwise. Env wins over both."""
+    """First provider with a key present. An explicit setting wins over all."""
     explicit = os.environ.get("OUROBOROS_LLM_PROVIDER", "").strip().lower()
     if explicit:
         if explicit not in PROVIDER_MODELS:
@@ -112,10 +122,13 @@ def active_provider() -> str:
                 f"{', '.join(sorted(PROVIDER_MODELS))}."
             )
         return explicit
-    if os.environ.get("GROQ_API_KEY"):
-        return "groq"
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        return "anthropic"
+    for provider, key in (
+        ("openai", "OPENAI_API_KEY"),
+        ("groq", "GROQ_API_KEY"),
+        ("anthropic", "ANTHROPIC_API_KEY"),
+    ):
+        if os.environ.get(key):
+            return provider
     return "groq"
 
 
@@ -340,6 +353,25 @@ class GroqLLM(StructuredChat):
         )
 
 
+class OpenAILLM(StructuredChat):
+    def __init__(self, model: str, temperature: float = 0.0):
+        super().__init__(model=model, provider="openai", temperature=temperature)
+
+    def _build(self, max_output_tokens: int):
+        from langchain_openai import ChatOpenAI
+
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise RuntimeError(
+                "OPENAI_API_KEY is not set. Put it in a .env file at the project "
+                "root or export it before starting the server."
+            )
+        return ChatOpenAI(
+            model=self.model,
+            temperature=self.temperature,
+            max_tokens=max_output_tokens,
+        )
+
+
 class AnthropicLLM(StructuredChat):
     def __init__(self, model: str, temperature: float = 0.0):
         super().__init__(model=model, provider="anthropic", temperature=temperature)
@@ -359,11 +391,12 @@ class AnthropicLLM(StructuredChat):
         )
 
 
+IMPLEMENTATIONS = {"groq": GroqLLM, "openai": OpenAILLM, "anthropic": AnthropicLLM}
+
+
 def build_llm(role: str = "default", provider: str | None = None) -> LLM:
     provider = provider or active_provider()
-    model = model_for(role, provider)
-    implementation = GroqLLM if provider == "groq" else AnthropicLLM
-    return implementation(model=model)
+    return IMPLEMENTATIONS[provider](model=model_for(role, provider))
 
 
 def default_llm() -> LLM:
@@ -391,7 +424,11 @@ def context_chars(role: str = "default", provider: str | None = None) -> int:
 def describe_configuration() -> dict[str, object]:
     """What the server reports at /api/health, so misconfiguration is visible."""
     provider = active_provider()
-    key_var = "GROQ_API_KEY" if provider == "groq" else "ANTHROPIC_API_KEY"
+    key_var = {
+        "groq": "GROQ_API_KEY",
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+    }[provider]
     limits = limits_for(provider)
     return {
         "provider": provider,

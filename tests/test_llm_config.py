@@ -8,6 +8,7 @@ from ouroboros.llm.client import (
     PROVIDER_MODELS,
     AnthropicLLM,
     GroqLLM,
+    OpenAILLM,
     active_provider,
     build_llm,
     describe_configuration,
@@ -19,6 +20,7 @@ ENV_VARS = [
     "OUROBOROS_DEFAULT_MODEL",
     "OUROBOROS_CRITIC_MODEL",
     "GROQ_API_KEY",
+    "OPENAI_API_KEY",
     "ANTHROPIC_API_KEY",
 ]
 
@@ -35,15 +37,23 @@ def test_groq_is_chosen_when_its_key_is_present(monkeypatch):
     assert active_provider() == "groq"
 
 
+def test_openai_is_chosen_when_its_key_is_present(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert active_provider() == "openai"
+
+
 def test_anthropic_is_chosen_when_only_its_key_is_present(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     assert active_provider() == "anthropic"
 
 
-def test_groq_wins_when_both_keys_are_present(monkeypatch):
+def test_provider_precedence_is_openai_then_groq_then_anthropic(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     assert active_provider() == "groq"
+
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    assert active_provider() == "openai"
 
 
 def test_explicit_provider_overrides_the_keys(monkeypatch):
@@ -53,13 +63,14 @@ def test_explicit_provider_overrides_the_keys(monkeypatch):
 
 
 def test_unknown_provider_fails_loudly(monkeypatch):
-    monkeypatch.setenv("OUROBOROS_LLM_PROVIDER", "openai")
+    monkeypatch.setenv("OUROBOROS_LLM_PROVIDER", "mistral")
     with pytest.raises(RuntimeError, match="expected one of"):
         active_provider()
 
 
 def test_model_defaults_per_provider():
     assert model_for("default", "groq") == "openai/gpt-oss-120b"
+    assert model_for("default", "openai") == "gpt-4o-mini"
     assert model_for("default", "anthropic") == "claude-sonnet-5"
 
 
@@ -76,6 +87,9 @@ def test_every_provider_defines_every_role():
 def test_build_llm_returns_the_matching_implementation(monkeypatch):
     monkeypatch.setenv("GROQ_API_KEY", "gsk_test")
     assert isinstance(build_llm("default"), GroqLLM)
+
+    monkeypatch.setenv("OUROBOROS_LLM_PROVIDER", "openai")
+    assert isinstance(build_llm("default"), OpenAILLM)
 
     monkeypatch.setenv("OUROBOROS_LLM_PROVIDER", "anthropic")
     assert isinstance(build_llm("critic"), AnthropicLLM)

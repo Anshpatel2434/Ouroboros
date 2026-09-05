@@ -57,27 +57,90 @@ def _feedback_block(feedback: str) -> str:
     )
 
 
+# How many requirements one planning call handles. A whole backlog in a single
+# response is a large, deeply nested object: the weaker models return nothing
+# valid at all, and the stronger ones quietly drop requirements — one live run
+# produced three tasks covering none of eight requirements. Planning a few at a
+# time keeps each response small enough to come back intact, and a model handed
+# three requirements cannot forget the other five.
+REQUIREMENTS_PER_CALL = 3
+
+
+def _chunk_requirements(spec: ProjectSpec) -> list[list]:
+    requirements = list(spec.requirements)
+    if len(requirements) <= REQUIREMENTS_PER_CALL + 1:
+        return [requirements]
+    return [
+        requirements[i : i + REQUIREMENTS_PER_CALL]
+        for i in range(0, len(requirements), REQUIREMENTS_PER_CALL)
+    ]
+
+
 def plan_backlog(
     llm: LLM, retriever: FileCorpusRetriever, spec: ProjectSpec, feedback: str = ""
 ) -> Backlog:
-    """Decompose the spec into one-commit tasks with real acceptance checks."""
+    """Decompose the spec into one-commit tasks with real acceptance checks.
+
+    Planned in chunks of requirements, then merged and normalised. Coverage is
+    the thing being protected: every requirement must reach some task.
+    """
     component_map = "\n".join(
         f"- {c.name}: owns {', '.join(c.paths)} — {c.responsibility}" for c in spec.components
     )
-    backlog = llm.structured(
-        Backlog,
-        system=BACKLOG_PLANNER,
-        user=(
-            f"Specification:\n{_spec_context(spec)}\n\n"
-            f"Components and the paths they own (use these for scope fences):\n{component_map}\n\n"
-            f"Verification available to every check script:\n"
-            + "\n".join(f"- {label}: {cmd}" for label, cmd in spec.verification.commands())
-            + f"\n\nStack knowledge:\n{_stack_context(retriever, spec, 'backlog')}"
-            + _feedback_block(feedback)
-        ),
-        role="backlog",
+    verification = "\n".join(
+        f"- {label}: {cmd}" for label, cmd in spec.verification.commands()
     )
-    return _normalize_backlog(backlog, spec)
+
+    # No stack playbook here, deliberately. Planning tasks needs the
+    # requirements, the components that own paths, and the commands a check can
+    # run — all of which are below. The playbook is layout and tooling detail
+    # that only the skeleton planner acts on, and injecting it measurably
+    # destabilised structured decoding: the identical call succeeds without it
+    # and returns invalid JSON with it.
+    shared = (
+        f"Project: {spec.name} — {spec.one_line}\n"
+        f"Stack: {spec.stack.language} {spec.stack.language_version}, "
+        f"{spec.stack.framework or 'no framework'}, {spec.stack.package_manager}\n"
+        f"Non-goals (never build these): {'; '.join(spec.non_goals) or 'none'}\n\n"
+        f"Components and the paths they own (use these for scope fences):\n{component_map}\n\n"
+        f"Verification available to every check script:\n{verification}"
+    )
+
+    chunks = _chunk_requirements(spec)
+    tasks: list[Task] = []
+
+    for index, group in enumerate(chunks, start=1):
+        rendered = "\n\n".join(
+            f"{r.id}: {r.statement}\n  accepted when: "
+            + "\n                ".join(r.acceptance_criteria)
+            + (f"\n  depends on: {', '.join(r.depends_on)}" if r.depends_on else "")
+            for r in group
+        )
+        already = (
+            "\n\nTasks already planned for earlier requirements (depend on these "
+            "by id where the work genuinely requires it, and do not repeat them):\n"
+            + "\n".join(f"- {t.id}: {t.title}" for t in tasks)
+            if tasks
+            else ""
+        )
+
+        result = llm.structured(
+            Backlog,
+            system=BACKLOG_PLANNER,
+            user=(
+                f"{shared}\n\n"
+                f"Plan tasks for these requirements only "
+                f"(group {index} of {len(chunks)}). Every one of them must be "
+                f"delivered by at least one task, and every task must set "
+                f"requirement_id:\n\n{rendered}"
+                f"{already}"
+                + _feedback_block(feedback)
+            ),
+            role="backlog",
+        )
+        tasks.extend(result.tasks)
+
+    return _normalize_backlog(Backlog(tasks=tasks), spec)
 
 
 def _clean_check_script(body: str) -> str:
