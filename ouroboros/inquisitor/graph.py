@@ -328,6 +328,43 @@ def _route(state: InterviewState) -> str:
     return "collect" if state.get("status") == "interviewing" else END
 
 
+# Interview state carries our own Pydantic models, and the checkpointer has to
+# be told they are safe to reconstruct. Without this every resume logs a warning
+# per type, and a future LangGraph will refuse to deserialize them at all.
+CHECKPOINT_TYPES = [
+    ("ouroboros.models.interview", "SpecDraft"),
+    ("ouroboros.models.interview", "Question"),
+    ("ouroboros.models.interview", "QuestionOption"),
+    ("ouroboros.models.interview", "QuestionBatch"),
+    ("ouroboros.models.interview", "InterviewTurn"),
+    ("ouroboros.models.interview", "Answer"),
+    ("ouroboros.models.spec", "ProjectSpec"),
+    ("ouroboros.models.spec", "StackProfile"),
+    ("ouroboros.models.spec", "VerificationPlan"),
+    ("ouroboros.models.spec", "Component"),
+    ("ouroboros.models.spec", "Requirement"),
+    ("ouroboros.models.spec", "LoopBoundaries"),
+    ("ouroboros.models.spec", "Topology"),
+    ("ouroboros.inquisitor.lint", "LintReport"),
+    ("ouroboros.inquisitor.lint", "LintFinding"),
+    ("ouroboros.inquisitor.lint", "Severity"),
+]
+
+
+def default_checkpointer():
+    """An in-memory checkpointer that knows how to restore our state types."""
+    try:
+        from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+
+        return MemorySaver(
+            serde=JsonPlusSerializer(allowed_msgpack_modules=CHECKPOINT_TYPES)
+        )
+    except (ImportError, TypeError):
+        # Older or newer LangGraph without this parameter: the warnings are
+        # noisy but harmless, and an interview must not fail over them.
+        return MemorySaver()
+
+
 def build_interview_graph(deps: InquisitorDeps | None = None, checkpointer=None):
     """Compile the interview graph. A checkpointer is required for interrupts."""
     deps = deps or InquisitorDeps()
@@ -346,7 +383,7 @@ def build_interview_graph(deps: InquisitorDeps | None = None, checkpointer=None)
     graph.add_edge("stack", "assess")
     graph.add_conditional_edges("assess", _route, {"collect": "collect", END: END})
 
-    return graph.compile(checkpointer=checkpointer or MemorySaver())
+    return graph.compile(checkpointer=checkpointer or default_checkpointer())
 
 
 class InterviewSession:

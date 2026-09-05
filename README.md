@@ -53,10 +53,14 @@ against the live API:
   rejected anyway, the JSON the model produced is salvaged from the error rather
   than paid for twice.
 - **The free tier allows 8,000 tokens per minute and counts requested output
-  against it.** So output caps are set per role (a skeleton plan needs far more
-  room than a question batch), prompts are trimmed to what is left, and a rolling
-  token-bucket paces requests. A full interview takes several minutes as a
-  result — that is the quota, not the code.
+  against it.** So output caps are set per role (a full spec draft needs nearly
+  the whole budget; a question batch needs a fraction), prompts are trimmed to
+  what is left, and a rolling token-bucket paces requests. A full interview takes
+  several minutes as a result — that is the quota, not the code.
+- **There is also a 200,000 token per-day ceiling**, which is roughly four to six
+  complete interview-and-generate runs. That limit is detected separately and
+  fails fast with a clear message, because unlike the per-minute limit, waiting
+  does not fix it.
 
 ## How it works
 

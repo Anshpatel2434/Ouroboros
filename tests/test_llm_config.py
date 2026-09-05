@@ -96,3 +96,23 @@ def test_health_configuration_never_leaks_the_key(monkeypatch):
     assert described["provider"] == "groq"
     assert described["api_key_present"] is True
     assert "gsk_secret_value" not in str(described)
+
+
+def test_daily_and_minute_limits_are_told_apart():
+    """Waiting fixes a per-minute limit and does nothing for a per-day one."""
+    from ouroboros.llm.client import _is_daily_limit, _is_rate_limit
+
+    per_minute = (
+        "Error code: 413 - Request too large for model in organization on tokens "
+        "per minute (TPM): Limit 8000, Requested 9317"
+    )
+    per_day = (
+        "Error code: 429 - Rate limit reached for model in organization on tokens "
+        "per day (TPD): Limit 200000, Used 197402, Requested 3049"
+    )
+
+    assert _is_rate_limit(Exception(per_minute))
+    assert not _is_daily_limit(Exception(per_minute))
+
+    assert _is_daily_limit(Exception(per_day))
+    assert not _is_daily_limit(Exception("connection reset"))

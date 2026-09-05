@@ -30,7 +30,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # fails a run that has already spent real tokens.
 for stream in (sys.stdout, sys.stderr):
     if hasattr(stream, "reconfigure"):
-        stream.reconfigure(encoding="utf-8", errors="replace")
+        # line_buffering so a redirected long run streams instead of appearing
+        # only at exit.
+        stream.reconfigure(encoding="utf-8", errors="replace", line_buffering=True)
 
 from pydantic import BaseModel, Field  # noqa: E402
 

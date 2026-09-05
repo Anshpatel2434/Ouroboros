@@ -67,12 +67,18 @@ PROVIDER_MODELS = {
 
 PROVIDER_LIMITS = {"groq": GROQ_LIMITS, "anthropic": ANTHROPIC_LIMITS}
 
-# How each provider is asked for structured output. Measured, not assumed:
-# on Groq, LangChain's default function-calling path fails on schemas the size
-# of SpecDraft ("attempted to call too many tools" / "did not call a tool"),
-# while json_schema returns them reliably. Anthropic's tool calling is fine, so
-# it keeps the library default.
-STRUCTURED_METHOD: dict[str, str | None] = {"groq": "json_schema", "anthropic": None}
+# How each provider is asked for structured output, in fallback order. Measured,
+# not assumed: on Groq, LangChain's default function-calling path fails on
+# schemas the size of SpecDraft ("attempted to call too many tools" / "did not
+# call a tool"), while json_schema returns them reliably — but json_schema has
+# its own failure mode where the model echoes the schema back. The two fail
+# differently, so trying the second when the first breaks recovers a run that
+# would otherwise be lost. Anthropic's tool calling is fine and keeps the
+# library default.
+STRUCTURED_METHODS: dict[str, list[str | None]] = {
+    "groq": ["json_schema", "function_calling"],
+    "anthropic": [None],
+}
 
 RATE_LIMIT_RETRIES = 4
 
@@ -172,6 +178,20 @@ def salvage_failed_generation(schema: type[T], error: Exception) -> T | None:
     return None
 
 
+class DailyQuotaExhausted(RuntimeError):
+    """The provider's per-day token allowance is gone.
+
+    Distinct from a per-minute limit on purpose: waiting a minute fixes one and
+    does nothing for the other, so retrying a daily limit just burns time and
+    then fails anyway.
+    """
+
+
+def _is_daily_limit(error: Exception) -> bool:
+    text = str(error).lower()
+    return "per day" in text or "tpd" in text
+
+
 def _is_rate_limit(error: Exception) -> bool:
     text = str(error).lower()
     return (
@@ -202,6 +222,7 @@ class StructuredChat:
         self.limiter = limiter_for(provider)
         self.trimmed_prompts = 0
         self.salvaged = 0
+        self.method_fallbacks = 0
         self._clients: dict[int, object] = {}
 
     def _build(self, max_output_tokens: int):  # pragma: no cover
@@ -223,13 +244,17 @@ class StructuredChat:
         if was_trimmed:
             self.trimmed_prompts += 1
 
-        method = STRUCTURED_METHOD.get(self.provider)
         client = self._client(max_output)
-        model = (
-            client.with_structured_output(schema, method=method)
-            if method
-            else client.with_structured_output(schema)
-        )
+        methods = STRUCTURED_METHODS.get(self.provider, [None])
+
+        def bind(method: str | None):
+            return (
+                client.with_structured_output(schema, method=method)
+                if method
+                else client.with_structured_output(schema)
+            )
+
+        model = bind(methods[0])
 
         def invoke(prompt: str) -> T:
             cost = estimate_tokens(system) + estimate_tokens(prompt) + max_output
@@ -251,6 +276,14 @@ class StructuredChat:
                         self.salvaged += 1
                         return recovered
 
+                    if _is_daily_limit(error):
+                        raise DailyQuotaExhausted(
+                            f"{self.provider} has no tokens left for today. Waiting "
+                            "will not help; use a different key or provider, or "
+                            "resume tomorrow. Any completed interview is still in "
+                            f"the session.\n\nProvider said: {str(error)[:300]}"
+                        ) from None
+
                     if not _is_rate_limit(error) or attempt == RATE_LIMIT_RETRIES - 1:
                         raise
                     # The quota resets on a rolling minute; wait it out.
@@ -259,9 +292,24 @@ class StructuredChat:
 
         try:
             return invoke(user)
-        except Exception as first_error:  # noqa: BLE001 - repaired below
+        except Exception as first_error:  # noqa: BLE001 - recovered below
             if _is_rate_limit(first_error):
                 raise
+
+            # Same prompt, different way of asking. The methods fail on
+            # different inputs, so this is a cheaper recovery than re-prompting.
+            for fallback in methods[1:]:
+                try:
+                    model = bind(fallback)
+                    result = invoke(user)
+                    self.method_fallbacks += 1
+                    return result
+                except Exception as fallback_error:  # noqa: BLE001
+                    if _is_rate_limit(fallback_error):
+                        raise
+                    first_error = fallback_error
+
+            model = bind(methods[0])
             repair_note = (
                 "\n\nYour previous response could not be parsed into the required "
                 f"schema. The error was:\n{str(first_error)[:600]}\n"

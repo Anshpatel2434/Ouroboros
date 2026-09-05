@@ -122,3 +122,24 @@ def test_oversized_single_request_is_still_admitted():
 
     assert clock.slept == []
     assert limiter.spent_in_window() == 5000
+
+
+def test_draft_role_can_carry_a_whole_spec():
+    """A live run truncated a draft mid-JSON at 2,200 tokens.
+
+    The draft is the entire spec returned in full every round, so it needs
+    nearly the whole output budget. A trimmed prompt still works; a truncated
+    response does not parse at all.
+    """
+    assert GROQ_LIMITS.output_for("draft") >= 4500
+    assert GROQ_LIMITS.output_for("draft") > GROQ_LIMITS.output_for("questions") * 3
+    # And it must still fit inside the minute.
+    assert (
+        GROQ_LIMITS.output_for("draft") + GROQ_LIMITS.prompt_budget("draft")
+        <= GROQ_LIMITS.tokens_per_minute
+    )
+
+
+def test_every_role_still_leaves_room_for_a_real_prompt():
+    for role in ("questions", "draft", "backlog", "skeleton", "review"):
+        assert GROQ_LIMITS.prompt_budget(role) >= 512, role

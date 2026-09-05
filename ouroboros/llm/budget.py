@@ -67,11 +67,15 @@ class ProviderLimits:
         is what makes a tight per-minute budget usable at all.
         """
         share = {
-            "questions": 0.30,
-            "draft": 0.55,
-            "backlog": 0.75,
+            "questions": 0.28,
+            # The draft is the whole spec, returned in full every round. A live
+            # run was truncated mid-JSON at 2,200 tokens once the spec reached
+            # eight requirements, and a half-written object fails to parse. This
+            # role needs nearly the entire output budget.
+            "draft": 0.95,
+            "backlog": 0.90,
             "skeleton": 1.00,
-            "review": 0.45,
+            "review": 0.40,
             "lint": 0.35,
             "research": 0.55,
             "default": 0.55,
@@ -87,9 +91,12 @@ class ProviderLimits:
         return max(512, min(self.max_prompt_tokens, int(room * 0.85)))
 
 
-# Free-tier Groq: 8,000 TPM, and max_tokens counts against it.
+# Free-tier Groq: 8,000 TPM, and max_tokens counts against it. The output
+# ceiling is high because a complete spec draft is a large object; the prompt
+# budget shrinks to match, which is the right trade — a trimmed prompt still
+# works, a truncated response does not parse at all.
 GROQ_LIMITS = ProviderLimits(
-    tokens_per_minute=8000, max_prompt_tokens=5000, max_output_tokens=4000
+    tokens_per_minute=8000, max_prompt_tokens=5000, max_output_tokens=5200
 )
 
 # Anthropic's limits are far higher; nothing here is the binding constraint.
