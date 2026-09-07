@@ -244,6 +244,45 @@ def _check_verification(spec: ProjectSpec) -> list[LintFinding]:
                 )
             )
 
+    for label, command in spec.verification.commands():
+        if command.strip().lower() in LABEL_WORDS:
+            findings.append(
+                LintFinding(
+                    code="LABEL_AS_COMMAND",
+                    severity=Severity.ERROR,
+                    location=f"verification.{label}",
+                    evidence=f"'{label}' is set to '{command}', which is the name "
+                    "of the step rather than a command.",
+                    rectification="Give the actual command line for this stack, "
+                    "such as 'uv sync' or 'pytest -q'. verify.sh runs this verbatim.",
+                )
+            )
+
+    manager = spec.stack.package_manager.strip().lower()
+    expected = MANAGER_TOOLS.get(manager)
+    if expected:
+        other_tools = {
+            tool
+            for name, tools in MANAGER_TOOLS.items()
+            if name != manager
+            for tool in tools
+        } - expected
+        install = (spec.verification.install or "").strip()
+        first = install.split()[0].lower() if install else ""
+        if first in other_tools:
+            findings.append(
+                LintFinding(
+                    code="MISMATCHED_TOOLCHAIN",
+                    severity=Severity.ERROR,
+                    location="verification.install",
+                    evidence=f"The install command is '{install}' but the package "
+                    f"manager is '{manager}'.",
+                    rectification=f"Use the {manager} command that installs this "
+                    "project's dependencies. A command from another ecosystem is "
+                    "valid on its own and still cannot install anything here.",
+                )
+            )
+
     for label in ("lint", "typecheck", "build", "smoke"):
         command = getattr(spec.verification, label)
         if command is not None and 0 < len(command.strip()) < 2:
@@ -269,6 +308,60 @@ def _check_verification(spec: ProjectSpec) -> list[LintFinding]:
                 "it the agent can pass tests while shipping something that never runs.",
             )
         )
+    return findings
+
+
+LABEL_WORDS = {"install", "test", "lint", "build", "smoke", "typecheck", "verify"}
+
+# The tool each package manager actually drives. Used to catch a command that is
+# perfectly valid but belongs to a different ecosystem: a live interview settled
+# on `npm ci` as the install command for a Python project using pip, which is a
+# real command, so nothing that merely checked for junk could see it.
+MANAGER_TOOLS = {
+    "pip": {"pip", "python"},
+    "uv": {"uv"},
+    "poetry": {"poetry"},
+    "pdm": {"pdm"},
+    "hatch": {"hatch"},
+    "conda": {"conda"},
+    "npm": {"npm", "npx"},
+    "pnpm": {"pnpm"},
+    "yarn": {"yarn"},
+    "bun": {"bun", "bunx"},
+    "cargo": {"cargo"},
+    "go": {"go"},
+    "maven": {"mvn"},
+    "gradle": {"gradle"},
+    "bundler": {"bundle", "gem"},
+    "composer": {"composer"},
+}
+
+
+def _check_stack(spec: ProjectSpec) -> list[LintFinding]:
+    """A stack field can be present and still be useless.
+
+    A live interview produced an empty package manager. StackProfile requires
+    the field, an empty string satisfies that, and every generated command then
+    referenced a tool that does not exist.
+    """
+    findings: list[LintFinding] = []
+    for field, label in (
+        ("language", "language"),
+        ("language_version", "language version"),
+        ("package_manager", "package manager"),
+    ):
+        if not (getattr(spec.stack, field) or "").strip():
+            findings.append(
+                LintFinding(
+                    code="INCOMPLETE_STACK",
+                    severity=Severity.ERROR,
+                    location=f"stack.{field}",
+                    evidence=f"The {label} is empty.",
+                    rectification=f"Record the {label}. init.sh and verify.sh are "
+                    "built from it, so an empty value makes every generated "
+                    "command wrong.",
+                )
+            )
     return findings
 
 
@@ -376,6 +469,7 @@ CHECKS = (
     _check_goal_framing,
     _check_requirements,
     _check_verification,
+    _check_stack,
     _check_components,
     _check_stack_coverage,
 )

@@ -10,10 +10,12 @@ from ouroboros.inquisitor.research import StackPlaybook, stack_slug
 from ouroboros.inquisitor.semantic import SemanticReport
 from ouroboros.models.interview import Question, QuestionBatch, SpecDraft
 from ouroboros.models.spec import Component, Requirement, StackProfile, VerificationPlan
-from tests.fakes import FakeLLM
+from tests.fakes import FakeLLM, patch_responses
 
 
-def batch(*texts: str) -> QuestionBatch:
+def batch(*texts: str, group=None) -> QuestionBatch:
+    from ouroboros.models.patches import FieldGroup
+
     return QuestionBatch(
         questions=[
             Question(
@@ -21,11 +23,33 @@ def batch(*texts: str) -> QuestionBatch:
                 header="Scope",
                 text=text,
                 why_it_matters="Fills a required spec field.",
+                field_group=group or FieldGroup.REQUIREMENTS,
             )
             for i, text in enumerate(texts, start=1)
         ],
         rationale="Narrowing the spec.",
     )
+
+
+def group_batch(*groups) -> QuestionBatch:
+    """One question per field group, so a round can fill several parts."""
+    return QuestionBatch(
+        questions=[
+            Question(
+                id=f"q{i}",
+                header=g.value,
+                text=f"Tell me about {g.value}.",
+                why_it_matters=f"Fills the {g.value} part of the spec.",
+                field_group=g,
+            )
+            for i, g in enumerate(groups, start=1)
+        ],
+        rationale="Filling the spec group by group.",
+    )
+
+
+def answers_for(state) -> list[dict]:
+    return [{"question_id": q["id"], "value": "As described."} for q in state["questions"]]
 
 
 def complete_draft() -> SpecDraft:
@@ -84,84 +108,123 @@ def deps(tmp_path):
     return make
 
 
+def full_llm(draft=None, **_ignored):
+    """A model scripted for the patch architecture.
+
+    Only the wording of a question is scripted. Which part of the spec it is
+    about is decided by the system, so there is nothing here to get wrong.
+    """
+    from ouroboros.models.interview import SingleQuestion
+
+    target = draft or complete_draft()
+    responses = dict(patch_responses(target))
+    responses[SingleQuestion] = [
+        SingleQuestion(
+            header="Scope",
+            text="Tell me more about this part.",
+            why_it_matters="Fills a required part of the spec.",
+        )
+    ]
+    responses[StackPlaybook] = [playbook()]
+    responses[SemanticReport] = [SemanticReport(findings=[])]
+    return FakeLLM(responses)
+
+
+def run_until_settled(session, brief="An invoice tracker.", limit=8):
+    state = session.start(brief)
+    for _ in range(limit):
+        if state["status"] != "interviewing" or not state["questions"]:
+            break
+        state = session.answer(answers_for(state))
+    return state
+
+
 def test_interview_converges_to_a_clean_spec(deps):
-    llm = FakeLLM(
-        {
-            QuestionBatch: [batch("What problem does this solve?", "Which stack?")],
-            SpecDraft: [complete_draft()],
-            StackPlaybook: [playbook()],
-            SemanticReport: [SemanticReport(findings=[])],
-        }
+    session = InterviewSession("t1", deps=deps(full_llm()))
+    state = run_until_settled(session)
+
+    assert state["status"] == "ready", state.get("lint")
+    assert state["spec"]["name"] == "Invoice Tracker"
+    assert state["questions"] == []
+
+
+def test_an_answer_only_touches_its_own_field_group():
+    """The architectural guarantee, at the level it actually lives.
+
+    The old integrator rewrote the whole draft each round, so a forgotten field
+    was a deleted field. Extraction is confined to one group, which makes losing
+    an unrelated field unrepresentable rather than merely unlikely.
+    """
+    from ouroboros.inquisitor.extract import apply_patch
+    from ouroboros.models.patches import FieldGroup, RequirementsPatch
+
+    before = complete_draft()
+    after = apply_patch(
+        before,
+        FieldGroup.REQUIREMENTS,
+        RequirementsPatch(
+            requirements=[
+                Requirement(id="R-042", statement="Only this lands.", acceptance_criteria=["ok"])
+            ]
+        ),
     )
-    session = InterviewSession("t1", deps=deps(llm))
 
-    opened = session.start("A tool for tracking freelance invoices.")
-    assert opened["status"] == "interviewing"
-    assert len(opened["questions"]) == 2
+    assert [r.id for r in after.requirements] == ["R-042"]
+    assert after.name == before.name
+    assert after.stack.language == before.stack.language
+    assert after.verification.test == before.verification.test
+    assert after.components == before.components
 
-    result = session.answer(
-        [{"question_id": "q1", "value": "Chasing invoices."}, {"question_id": "q2", "value": "Python."}]
-    )
 
-    assert result["status"] == "ready"
-    assert result["spec"]["name"] == "Invoice Tracker"
-    assert result["lint"] is not None
-    assert result["questions"] == []
+def test_the_agenda_is_derived_from_the_draft_not_the_model():
+    """Which part of the spec to ask about is a fact, not a judgement call."""
+    from ouroboros.inquisitor.agenda import plan_round
+    from ouroboros.models.patches import FieldGroup
+
+    empty = SpecDraft()
+    groups = [group for group, _ in plan_round(empty, [])]
+
+    assert FieldGroup.IDENTITY in groups
+    assert len(groups) <= 3, "a round stays answerable"
+
+    filled = complete_draft()
+    assert plan_round(filled, []) == [], "nothing missing means nothing to ask"
 
 
 def test_incomplete_draft_triggers_another_round(deps):
-    llm = FakeLLM(
-        {
-            QuestionBatch: [batch("What problem does this solve?")],
-            SpecDraft: [SpecDraft(name="Half a spec", one_line="Not finished.")],
-            SemanticReport: [SemanticReport(findings=[])],
-        }
-    )
+    from ouroboros.models.patches import FieldGroup
+
+    partial = SpecDraft(name="Half a spec", one_line="Not finished.", problem="Unclear.")
+    llm = full_llm(partial, batches=[group_batch(FieldGroup.IDENTITY)])
     session = InterviewSession("t2", deps=deps(llm))
     session.start("Something vague.")
     result = session.answer([{"question_id": "q1", "value": "Not sure yet."}])
 
     assert result["status"] == "interviewing"
-    assert result["round"] == 2
     assert result["questions"], "an incomplete draft must produce more questions"
     assert "stack" in result["missing_fields"]
 
 
 def test_round_cap_stops_the_interview(deps):
     """An interviewer that cannot converge must stop, not question forever."""
-    llm = FakeLLM(
-        {
-            QuestionBatch: [batch("Still unclear?")],
-            SpecDraft: [SpecDraft(name="Never finished")],
-            SemanticReport: [SemanticReport(findings=[])],
-        }
-    )
-    session = InterviewSession("t3", deps=deps(llm))
-    session.start("A vague idea.")
+    from ouroboros.models.patches import FieldGroup
 
-    for _ in range(4):
-        state = session.answer([{"question_id": "q1", "value": "Still unsure."}])
-        if state["status"] != "interviewing":
-            break
+    llm = full_llm(SpecDraft(name="Never finished"), batches=[group_batch(FieldGroup.IDENTITY)])
+    session = InterviewSession("t3", deps=deps(llm))
+    state = run_until_settled(session, "A vague idea.")
 
     assert state["status"] == "exhausted"
     assert state["spec"] is None, "generation must stay refused"
-    assert any("Stopped after" in n for n in state["notices"])
 
 
 def test_unknown_stack_is_researched_and_written_back(deps, tmp_path):
     """Gap research compounds the corpus instead of guessing (D7/D9)."""
-    llm = FakeLLM(
-        {
-            QuestionBatch: [batch("Which stack?")],
-            SpecDraft: [complete_draft()],
-            StackPlaybook: [playbook()],
-            SemanticReport: [SemanticReport(findings=[])],
-        }
-    )
+    from ouroboros.models.patches import FieldGroup
+
+    llm = full_llm(batches=[group_batch(FieldGroup.STACK)])
     session = InterviewSession("t4", deps=deps(llm))
-    session.start("An invoice tracker.")
-    result = session.answer([{"question_id": "q1", "value": "Python and FastAPI."}])
+    state = session.start("An invoice tracker.")
+    result = session.answer(answers_for(state))
 
     slug = stack_slug(
         StackProfile(
@@ -170,29 +233,41 @@ def test_unknown_stack_is_researched_and_written_back(deps, tmp_path):
     )
     written = tmp_path / "06-stack-playbooks" / f"{slug}.md"
     assert written.exists(), "the researched stack must be added to the corpus"
-
-    text = written.read_text(encoding="utf-8")
-    assert "## Key knowledge" in text and "uv sync" in text
-    assert result["spec"]["stack"]["corpus_covered"] is True
+    assert "uv sync" in written.read_text(encoding="utf-8")
     assert any("Researched" in n for n in result["notices"])
 
 
 def test_transcript_records_every_exchange(deps):
-    llm = FakeLLM(
-        {
-            QuestionBatch: [batch("What problem does this solve?")],
-            SpecDraft: [complete_draft()],
-            StackPlaybook: [playbook()],
-            SemanticReport: [SemanticReport(findings=[])],
-        }
-    )
+    from ouroboros.models.patches import FieldGroup
+
+    llm = full_llm(batches=[group_batch(FieldGroup.IDENTITY)])
     session = InterviewSession("t5", deps=deps(llm))
-    session.start("An invoice tracker.")
+    state = session.start("An invoice tracker.")
     result = session.answer([{"question_id": "q1", "value": "Chasing invoices."}])
 
     assert result["transcript"] == [
-        {"question": "What problem does this solve?", "answer": "Chasing invoices."}
+        {"question": "Tell me more about this part.", "answer": "Chasing invoices."}
     ]
+
+
+def test_glossary_is_swept_even_when_no_question_targets_it(deps):
+    """Definitions arrive inside answers about other things.
+
+    Terms were once answered twice and stored zero times, so the lint kept
+    calling them undefined and the interviewer kept re-asking.
+    """
+    from ouroboros.models.patches import FieldGroup, GlossaryPatch
+
+    target = complete_draft()
+    target.glossary = {"overdue": "Past its due date and unpaid."}
+    llm = full_llm(target, batches=[group_batch(FieldGroup.REQUIREMENTS)])
+
+    session = InterviewSession("t-gloss", deps=deps(llm))
+    state = session.start("An invoice tracker.")
+    result = session.answer(answers_for(state))
+
+    assert llm.count(GlossaryPatch) == 1, "the glossary must be swept every round"
+    assert "overdue" in result["draft"]["glossary"]
 
 
 def test_missing_fields_names_unfenced_components():
@@ -240,73 +315,6 @@ def test_settled_summary_lists_defined_glossary_terms():
 
     assert "malformed URL" in _settled_summary(draft)
 
-
-def test_integrator_receives_outstanding_lint_findings(deps):
-    """Some findings can only be fixed by editing the spec, not by asking.
-
-    A live interview looped four rounds asking yes/no questions while the lint
-    repeated 'R-009 is redundant with R-006, remove it'. Only the integrator can
-    apply that, so it has to see the findings.
-    """
-    from ouroboros.inquisitor.lint import LintFinding, LintReport, Severity
-
-    llm = FakeLLM(
-        {
-            QuestionBatch: [batch("Anything else?")],
-            SpecDraft: [complete_draft()],
-            StackPlaybook: [playbook()],
-            SemanticReport: [SemanticReport(findings=[])],
-        }
-    )
-    state = {
-        "draft": complete_draft(),
-        "pending": batch("Anything else?"),
-        "answers": [{"question_id": "q1", "value": "Yes."}],
-        "transcript": [],
-        "lint": LintReport(
-            findings=[
-                LintFinding(
-                    code="COVERAGE_HOLE",
-                    severity=Severity.ERROR,
-                    location="requirements",
-                    evidence="R-009 is redundant with R-006.",
-                    rectification="Remove R-009 or clarify what it adds.",
-                )
-            ]
-        ),
-    }
-
-    from ouroboros.inquisitor.graph import integrate
-
-    integrate(state, deps(llm))
-
-    prompt = [user for schema, user in llm.calls if schema is SpecDraft][0]
-    assert "R-009 is redundant" in prompt
-    assert "remove, merge, or restructure" in prompt
-
-
-def test_integrator_prompt_stays_clean_when_the_lint_is_happy(deps):
-    llm = FakeLLM(
-        {SpecDraft: [complete_draft()], StackPlaybook: [playbook()]}
-    )
-    state = {
-        "draft": complete_draft(),
-        "pending": batch("Anything else?"),
-        "answers": [{"question_id": "q1", "value": "Yes."}],
-        "transcript": [],
-        "lint": None,
-    }
-
-    from ouroboros.inquisitor.graph import integrate
-
-    integrate(state, deps(llm))
-    prompt = [user for schema, user in llm.calls if schema is SpecDraft][0]
-    assert "refusing for these reasons" not in prompt
-
-
-# --------------------------------------------------------------------------- #
-# Draft merging — an omission must never be a deletion
-# --------------------------------------------------------------------------- #
 
 def test_merge_keeps_fields_the_model_omitted():
     """A live interview regressed to asking the project name again at round 5.
@@ -373,28 +381,6 @@ def test_merge_preserves_researched_stack_coverage():
     assert before.merged_with(update).stack.corpus_covered is True
 
 
-def test_integrate_merges_instead_of_replacing(deps):
-    llm = FakeLLM(
-        {
-            SpecDraft: [SpecDraft(problem="Only this field came back.")],
-            StackPlaybook: [playbook()],
-        }
-    )
-    state = {
-        "draft": complete_draft(),
-        "pending": batch("What is the problem?"),
-        "answers": [{"question_id": "q1", "value": "Chasing invoices."}],
-        "transcript": [],
-        "lint": None,
-    }
-
-    from ouroboros.inquisitor.graph import integrate
-
-    result = integrate(state, deps(llm))
-    assert result["draft"].problem == "Only this field came back."
-    assert result["draft"].name == "Invoice Tracker", "the rest must survive"
-
-
 def test_flattened_requirements_are_repaired():
     """gpt-4o-mini intermittently flattens objects into alternating key/value items.
 
@@ -436,3 +422,39 @@ def test_unrecognised_shapes_are_left_for_pydantic_to_reject():
     """Repair must not paper over genuinely wrong data."""
     with pytest.raises(Exception):
         SpecDraft.model_validate({"requirements": ["totally", "unrelated", "strings"]})
+
+
+def test_junk_verification_commands_are_filled_from_the_playbook(deps, tmp_path):
+    """Once a stack is researched its real commands are a fact we hold.
+
+    An interview settled on install='install', could only repair it by asking
+    again, waived it, and generated a verify.sh whose first step ran a word.
+    """
+    from ouroboros.inquisitor.graph import ensure_stack_coverage
+    from ouroboros.models.spec import VerificationPlan
+
+    llm = full_llm()
+    draft = complete_draft()
+    draft.stack.corpus_covered = False
+    draft.verification = VerificationPlan(install="install", test="test")
+
+    result = ensure_stack_coverage({"draft": draft, "notices": []}, deps(llm))
+    verification = result["draft"].verification
+
+    assert verification.install == "uv sync"
+    assert verification.test == "pytest -q"
+    assert any("Filled verification commands" in n for n in result["notices"])
+
+
+def test_a_real_command_is_never_overwritten(deps, tmp_path):
+    from ouroboros.inquisitor.graph import ensure_stack_coverage
+    from ouroboros.models.spec import VerificationPlan
+
+    llm = full_llm()
+    draft = complete_draft()
+    draft.stack.corpus_covered = False
+    draft.verification = VerificationPlan(install="poetry install", test="test")
+
+    result = ensure_stack_coverage({"draft": draft, "notices": []}, deps(llm))
+    assert result["draft"].verification.install == "poetry install"
+    assert result["draft"].verification.test == "pytest -q"

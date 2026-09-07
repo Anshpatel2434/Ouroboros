@@ -20,18 +20,27 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command, interrupt
 
 from ouroboros.corpus.retriever import FileCorpusRetriever
-from ouroboros.inquisitor.lint import LintReport
-from ouroboros.inquisitor.prompts import INTEGRATOR, INTERVIEWER
-from ouroboros.inquisitor.research import ensure_playbook
+from ouroboros.inquisitor.findings import FindingLedger, FindingRecord, Resolution
+from ouroboros.inquisitor.agenda import plan_round
+from ouroboros.inquisitor.extract import GROUP_BRIEF, extract_group
+from ouroboros.inquisitor.lint import LintReport, lint_spec
+from ouroboros.inquisitor.prompts import INTERVIEWER
+from ouroboros.inquisitor.research import (
+    ensure_playbook,
+    find_playbook,
+    playbook_commands,
+)
 from ouroboros.inquisitor.semantic import full_lint
 from ouroboros.llm.client import LLM, default_llm
+from ouroboros.models.patches import FieldGroup
 from ouroboros.models.interview import (
     InterviewTurn,
     Question,
     QuestionBatch,
+    SingleQuestion,
     SpecDraft,
 )
-from ouroboros.models.spec import ProjectSpec
+from ouroboros.models.spec import ProjectSpec, VerificationPlan
 
 Status = Literal["interviewing", "ready", "exhausted"]
 
@@ -40,6 +49,7 @@ MAX_ROUNDS = 12
 
 class InterviewState(TypedDict, total=False):
     brief: str
+    ledger: FindingLedger
     draft: SpecDraft
     round: int
     pending: QuestionBatch | None
@@ -65,68 +75,6 @@ def _corpus_context(deps: InquisitorDeps, query: str, limit: int = 4) -> str:
     if not hits:
         return "No corpus guidance retrieved for this brief."
     return "\n".join(f"- {h.document.title}: {h.document.relevance}" for h in hits)
-
-
-def _ask_prompt(state: InterviewState, deps: InquisitorDeps, findings_text: str = "") -> str:
-    from ouroboros.llm.budget import trim_to_tokens
-    from ouroboros.llm.client import limits_for
-
-    draft = state.get("draft") or SpecDraft()
-    asked = [t.question.text for t in state.get("transcript", [])]
-    missing = draft.missing_fields()
-
-    # Settled fields go in as a short list rather than buried in the draft JSON.
-    # An early version passed only the JSON and the interviewer asked for the
-    # project name three rounds running: what is already known has to be
-    # impossible to miss.
-    settled = _settled_summary(draft)
-
-    parts = [f"Project brief from the developer:\n{state.get('brief', '')}"]
-
-    if settled:
-        parts.append(
-            "\nALREADY SETTLED — do not ask about any of these again:\n" + settled
-        )
-
-    if missing:
-        parts.append(
-            "\nSTILL MISSING — this round's agenda. Ask only about these:\n"
-            + "\n".join(f"- {field}" for field in missing)
-        )
-    elif not findings_text:
-        parts.append(
-            "\nEvery required field is filled. Ask only what would sharpen a "
-            "requirement that is still too vague to verify."
-        )
-
-    if findings_text:
-        parts.append(
-            "\nThe ambiguity lint refuses to generate until these are resolved. "
-            "Ask the questions that resolve them — you must return at least one "
-            "question while any of these stand:\n" + findings_text
-        )
-
-    # The draft is the biggest thing here and the least load-bearing now that
-    # the settled list carries the same information, so it is trimmed hardest.
-    draft_json, _ = trim_to_tokens(
-        draft.model_dump_json(indent=2),
-        int(limits_for().prompt_budget("questions") * 0.35),
-    )
-    parts.append(f"\nFull draft for reference:\n{draft_json}")
-
-    if asked:
-        recent = asked[-12:]
-        parts.append(
-            "\nQuestions already asked. Asking any of these again wastes the "
-            "developer's time:\n" + "\n".join(f"- {q}" for q in recent)
-        )
-
-    parts.append(
-        "\nRelevant harness-engineering guidance:\n"
-        + _corpus_context(deps, state.get("brief", ""))
-    )
-    parts.append(f"\nAsk round {state.get('round', 0) + 1} of at most {deps.max_rounds}.")
-    return "\n".join(parts)
 
 
 def _settled_summary(draft: SpecDraft) -> str:
@@ -173,12 +121,79 @@ def _findings_text(report: LintReport | None) -> str:
     )
 
 
-def open_interview(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
-    batch = deps.llm.structured(
-        QuestionBatch, system=INTERVIEWER, user=_ask_prompt(state, deps), role="questions"
+
+def _ask_round(
+    state: InterviewState,
+    deps: InquisitorDeps,
+    draft: SpecDraft,
+    to_ask: list[FindingRecord],
+) -> QuestionBatch:
+    """One question per field group the system decided needs attention.
+
+    Each call is tiny and single-purpose, and the group is attached by us
+    afterwards rather than chosen by the model, so an answer always lands in the
+    part of the spec its question was about. An earlier version asked the model
+    to tag its own questions; gpt-4o-mini omitted the tag, every answer fell
+    through to one default group, and ten rounds of good answers landed nowhere.
+    """
+    planned = plan_round(draft, to_ask)
+    if not planned:
+        return QuestionBatch(questions=[], rationale="")
+
+    settled = _settled_summary(draft)
+    asked = [t.question.text for t in state.get("transcript", [])][-8:]
+    questions: list[Question] = []
+
+    for index, (group, reason) in enumerate(planned, start=1):
+        sections = [f"Project brief:\n{state.get('brief', '')}"]
+        if settled:
+            sections.append(
+                "Already settled — never ask about any of these again:\n" + settled
+            )
+        if asked:
+            sections.append(
+                "Questions already asked; do not repeat them:\n"
+                + "\n".join(f"- {q}" for q in asked)
+            )
+        sections.append(
+            f"Ask exactly one question about the {group.value} part of the "
+            f"specification.\nWhat that part covers: {GROUP_BRIEF[group]}\n"
+            f"Why it is on the agenda: {reason}"
+        )
+        sections.append(
+            "Offer concrete options when the sane answers are few. Ask one "
+            "question only; another will follow if more is needed."
+        )
+
+        single = deps.llm.structured(
+            SingleQuestion,
+            system=INTERVIEWER,
+            user="\n\n".join(sections),
+            role="questions",
+        )
+        questions.append(
+            Question(
+                id=f"q{index}",
+                header=single.header,
+                text=single.text,
+                kind=single.kind,
+                options=single.options,
+                why_it_matters=single.why_it_matters,
+                field_group=group,
+            )
+        )
+
+    return QuestionBatch(
+        questions=questions,
+        rationale="Filling the parts of the spec that are still open.",
     )
+
+
+def open_interview(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
+    draft = state.get("draft") or SpecDraft()
+    batch = _ask_round(state, deps, draft, [])
     return {
-        "draft": state.get("draft") or SpecDraft(),
+        "draft": draft,
         "pending": batch,
         "round": 1,
         "transcript": state.get("transcript", []),
@@ -217,48 +232,44 @@ def _normalize_answers(answers: Any) -> list[dict[str, str]]:
 
 
 def integrate(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
+    """Extract each answer into the one field group it belongs to.
+
+    Never a whole-draft rewrite. Each question declares its field group, the
+    answer is extracted into that group with a small schema, and every other
+    part of the draft is untouchable for the duration. Losing an unrelated field
+    is not merely unlikely here, it is unrepresentable.
+    """
     draft = state.get("draft") or SpecDraft()
     pending = state.get("pending")
     by_id = {q.id: q for q in (pending.questions if pending else [])}
 
     turns = list(state.get("transcript", []))
-    exchange_lines = []
+    by_group: dict[FieldGroup, list[str]] = {}
+    exchange_lines: list[str] = []
+
     for answer in state.get("answers", []):
         question = by_id.get(answer["question_id"])
         if question is None:
             continue
         turns.append(InterviewTurn(question=question, answer=answer["value"]))
-        exchange_lines.append(f"Q: {question.text}\nA: {answer['value']}")
+        line = f"Q: {question.text}\nA: {answer['value']}"
+        exchange_lines.append(line)
+        by_group.setdefault(question.field_group, []).append(line)
 
-    # Findings whose fix is a spec edit — a redundant requirement, a duplicated
-    # statement — cannot be resolved by asking the developer anything. A live
-    # interview looped for four rounds asking yes/no questions while the lint
-    # kept repeating "R-009 is redundant with R-006, remove it". The integrator
-    # is the only step that can actually apply that fix, so it sees them too.
-    outstanding = _findings_text(state.get("lint"))
-    structural_note = (
-        "\n\nThe ambiguity lint is currently refusing for these reasons. Where a "
-        "finding asks you to remove, merge, or restructure something in the spec, "
-        "DO IT NOW as part of this update — those cannot be fixed by asking the "
-        "developer another question. Where it asks for information you do not "
-        "have, leave it alone; it will be asked.\n" + outstanding
-        if outstanding
-        else ""
-    )
+    if not exchange_lines:
+        return {"transcript": turns, "answers": []}
 
-    updated = deps.llm.structured(
-        SpecDraft,
-        system=INTEGRATOR,
-        user=(
-            f"Current draft:\n{draft.model_dump_json(indent=2)}\n\n"
-            f"New answers:\n" + "\n\n".join(exchange_lines) +
-            structural_note +
-            "\n\nReturn the complete updated draft."
-        ),
-        role="draft",
-    )
-    # Fold rather than replace: an omitted field means "unchanged", not "deleted".
-    return {"draft": draft.merged_with(updated), "transcript": turns, "answers": []}
+    everything = "\n\n".join(exchange_lines)
+    for group, lines in by_group.items():
+        draft = extract_group(deps.llm, draft, group, "\n\n".join(lines))
+
+    # Definitions arrive inside answers about other things, so the glossary is
+    # always swept. It used to be filled only when a question happened to target
+    # it, which is why terms answered twice were stored zero times.
+    if FieldGroup.GLOSSARY not in by_group:
+        draft = extract_group(deps.llm, draft, FieldGroup.GLOSSARY, everything)
+
+    return {"draft": draft, "transcript": turns, "answers": []}
 
 
 def ensure_stack_coverage(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
@@ -266,69 +277,205 @@ def ensure_stack_coverage(state: InterviewState, deps: InquisitorDeps) -> dict[s
     draft = state.get("draft") or SpecDraft()
     notices = list(state.get("notices", []))
 
-    if draft.stack is None or draft.stack.corpus_covered:
+    if draft.stack is None:
         return {"notices": notices}
 
-    playbook, researched = ensure_playbook(
-        deps.llm, deps.retriever, draft.stack, root=deps.corpus_root
-    )
-    draft.stack.corpus_covered = True
-
-    if researched and playbook is not None:
-        notices.append(
-            f"Researched {draft.stack.language} "
-            f"{draft.stack.framework or ''}".strip() + " and added it to the corpus."
+    if not draft.stack.corpus_covered:
+        playbook, researched = ensure_playbook(
+            deps.llm, deps.retriever, draft.stack, root=deps.corpus_root
         )
-        # A researched playbook is a better source of verification commands than
-        # anything the developer half-remembers, but it never overrides what they
-        # explicitly told us.
-        if draft.verification is None:
-            draft.verification = playbook.to_verification()
+        draft.stack.corpus_covered = True
+        if researched and playbook is not None:
+            notices.append(
+                f"Researched {draft.stack.language} "
+                f"{draft.stack.framework or ''}".strip() + " and added it to the corpus."
+            )
+            if draft.verification is None:
+                draft.verification = playbook.to_verification()
 
+    draft = _adopt_known_commands(draft, deps, notices)
     return {"draft": draft, "notices": notices}
+
+
+def _adopt_known_commands(
+    draft: SpecDraft, deps: InquisitorDeps, notices: list[str]
+) -> SpecDraft:
+    """Fill blank or nonsense verification commands from the researched playbook.
+
+    Once a stack has been researched, its real commands are a fact we hold. An
+    interview once settled on `install` set to the word "install" and, because
+    the only repair route was to ask again, waived it and generated a verify.sh
+    whose first step ran a word. Correcting from the corpus is both more
+    reliable than re-asking and free.
+    """
+    from ouroboros.inquisitor.lint import LABEL_WORDS
+
+    document = find_playbook(deps.retriever, draft.stack)
+    if document is None:
+        return draft
+
+    known = playbook_commands(document)
+    if not known:
+        return draft
+
+    if draft.verification is None:
+        draft.verification = VerificationPlan(
+            install=known.get("install", ""), test=known.get("test", "")
+        )
+
+    adopted: list[str] = []
+    for label in ("install", "test", "lint", "typecheck", "build", "smoke"):
+        current = (getattr(draft.verification, label) or "").strip()
+        if current and current.lower() not in LABEL_WORDS:
+            continue  # The developer gave a real command; it stands.
+        replacement = known.get(label)
+        if replacement:
+            setattr(draft.verification, label, replacement)
+            adopted.append(f"{label}={replacement}")
+
+    if adopted:
+        notices.append(
+            "Filled verification commands from the researched stack playbook: "
+            + ", ".join(adopted)
+        )
+    return draft
+
+
+def _ledger_of(state: InterviewState) -> FindingLedger:
+    """The checkpointer round-trips state through msgpack, so this may be a dict."""
+    raw = state.get("ledger")
+    if isinstance(raw, FindingLedger):
+        return raw
+    if isinstance(raw, dict):
+        return FindingLedger.model_validate(raw)
+    return FindingLedger()
+
+
+def _evaluate(draft: SpecDraft, deps: InquisitorDeps) -> tuple[ProjectSpec | None, LintReport | None]:
+    """Lint the draft, paying for the LLM judge only when it can say something.
+
+    Deterministic checks run first and are free. The semantic pass is gated
+    behind them: asking a judge to reason about a spec that is still missing its
+    verification commands produces findings about the wrong thing, and each new
+    finding it invents is another round nobody needed.
+    """
+    spec = draft.to_spec()
+    if spec is None:
+        return None, None
+
+    report = lint_spec(spec)
+    if report.passed and not draft.missing_fields():
+        report = full_lint(deps.llm, spec)
+    return spec, report
+
+
+def _resolve_findings(
+    draft: SpecDraft, ledger: FindingLedger, report: LintReport | None, deps: InquisitorDeps
+) -> tuple[SpecDraft, list[FindingRecord], bool]:
+    """Push every live finding one rung up the ladder.
+
+    Returns the draft after any edits, the findings that need the developer, and
+    whether anything was edited.
+    """
+    live = ledger.observe(report)
+    to_ask: list[FindingRecord] = []
+    edited = False
+
+    for record in live:
+        if ledger.attempt(record) is Resolution.EDIT:
+            draft = extract_group(
+                deps.llm,
+                draft,
+                record.group,
+                exchange="(no new answers — this is a correction pass)",
+                guidance=record.as_instruction(),
+            )
+            edited = True
+        else:
+            to_ask.append(record)
+
+    return draft, to_ask, edited
 
 
 def assess(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
     draft = state.get("draft") or SpecDraft()
     round_no = state.get("round", 1)
-    spec = draft.to_spec()
+    ledger = _ledger_of(state)
 
-    report: LintReport | None = None
-    if spec is not None:
-        report = full_lint(deps.llm, spec)
-        if report.passed:
-            return {"lint": report, "spec": spec, "status": "ready", "pending": None}
+    spec, report = _evaluate(draft, deps)
+    if spec is not None and report is not None and report.passed:
+        return {
+            "lint": report,
+            "spec": spec,
+            "ledger": ledger,
+            "status": "ready",
+            "pending": None,
+            "notices": _notices_with_waivers(state, ledger),
+        }
+
+    draft, to_ask, edited = _resolve_findings(draft, ledger, report, deps)
+
+    # Corrections were applied, so re-check before spending a question on
+    # something already fixed. One re-check per round bounds the cost.
+    if edited:
+        spec, report = _evaluate(draft, deps)
+        if spec is not None and report is not None and report.passed:
+            return {
+                "draft": draft,
+                "lint": report,
+                "spec": spec,
+                "ledger": ledger,
+                "status": "ready",
+                "pending": None,
+                "notices": _notices_with_waivers(state, ledger),
+            }
+        to_ask = [r for r in ledger.observe(report) if r.next_resolution() is Resolution.ASK]
+
+    # Anything that has used up its attempts becomes a recorded assumption
+    # rather than an endless question. This is what makes the loop terminate.
+    ledger.waive_exhausted()
+    report = ledger.downgrade(report)
+    spec_now = draft.to_spec()
+    if spec_now is not None and report is not None and report.passed:
+        return {
+            "draft": draft,
+            "lint": report,
+            "spec": spec_now,
+            "ledger": ledger,
+            "status": "ready",
+            "pending": None,
+            "notices": _notices_with_waivers(state, ledger),
+        }
 
     if round_no >= deps.max_rounds:
         return {
+            "draft": draft,
             "lint": report,
             "spec": None,
+            "ledger": ledger,
             "status": "exhausted",
             "pending": None,
-            "notices": list(state.get("notices", []))
+            "notices": _notices_with_waivers(state, ledger)
             + [
                 f"Stopped after {round_no} rounds without a clean spec. "
                 "Generation stays refused; the remaining findings say what is missing."
             ],
         }
 
-    batch = deps.llm.structured(
-        QuestionBatch,
-        system=INTERVIEWER,
-        user=_ask_prompt(state, deps, _findings_text(report)),
-        role="questions",
-    )
+    batch = _ask_round(state, deps, draft, to_ask)
 
     if not batch.questions:
         # The interviewer had nothing left to ask but the spec is still not
         # clean. Stopping and saying so beats looping on an empty batch, which
         # looks to a caller exactly like a finished interview.
         return {
+            "draft": draft,
             "lint": report,
             "spec": None,
+            "ledger": ledger,
             "status": "exhausted",
             "pending": None,
-            "notices": list(state.get("notices", []))
+            "notices": _notices_with_waivers(state, ledger)
             + [
                 "The interviewer produced no further questions while the spec was "
                 f"still incomplete (missing: {', '.join(draft.missing_fields()) or 'nothing'}). "
@@ -337,11 +484,22 @@ def assess(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
         }
 
     return {
+        "draft": draft,
         "lint": report,
+        "ledger": ledger,
         "pending": batch,
         "round": round_no + 1,
         "status": "interviewing",
+        "notices": _notices_with_waivers(state, ledger),
     }
+
+
+def _notices_with_waivers(state: InterviewState, ledger: FindingLedger) -> list[str]:
+    """Notices plus every waived finding, so nothing is accepted invisibly."""
+    existing = [n for n in state.get("notices", []) if not n.startswith("Accepted without")]
+    seen: set[str] = set()
+    deduped = [n for n in existing + ledger.waiver_notes() if not (n in seen or seen.add(n))]
+    return deduped
 
 
 def _route(state: InterviewState) -> str:
@@ -352,6 +510,9 @@ def _route(state: InterviewState) -> str:
 # be told they are safe to reconstruct. Without this every resume logs a warning
 # per type, and a future LangGraph will refuse to deserialize them at all.
 CHECKPOINT_TYPES = [
+    ("ouroboros.inquisitor.findings", "FindingLedger"),
+    ("ouroboros.inquisitor.findings", "FindingRecord"),
+    ("ouroboros.models.patches", "FieldGroup"),
     ("ouroboros.models.interview", "SpecDraft"),
     ("ouroboros.models.interview", "Question"),
     ("ouroboros.models.interview", "QuestionOption"),

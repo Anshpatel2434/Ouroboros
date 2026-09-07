@@ -19,20 +19,13 @@ from ouroboros.models.interview import QuestionBatch, SpecDraft
 import ouroboros.server.app as app_module
 from tests.fakes import FakeLLM
 from tests.test_generator import backlog, skeleton
-from tests.test_interview import batch, complete_draft, playbook
+from tests.test_interview import answers_for, complete_draft, full_llm
 
 
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     """A client whose interview and generation both run on scripted models."""
-    interview_llm = FakeLLM(
-        {
-            QuestionBatch: [batch("What problem does this solve?")],
-            SpecDraft: [complete_draft()],
-            StackPlaybook: [playbook()],
-            SemanticReport: [SemanticReport(findings=[])],
-        }
-    )
+    interview_llm = full_llm()
     generation_llm = FakeLLM(
         {
             Backlog: [backlog()],
@@ -65,10 +58,14 @@ def interviewed(client) -> str:
     """Run an interview to completion and return the thread id."""
     started = client.post("/api/interview/start", json={"brief": "An invoice tracker."}).json()
     thread = started["thread_id"]
-    client.post(
-        f"/api/interview/{thread}/answer",
-        json={"answers": [{"question_id": "q1", "value": "Chasing invoices."}]},
-    )
+    state = started
+    for _ in range(8):
+        if state["status"] != "interviewing" or not state["questions"]:
+            break
+        state = client.post(
+            f"/api/interview/{thread}/answer",
+            json={"answers": answers_for(state)},
+        ).json()
     return thread
 
 
@@ -83,7 +80,7 @@ def test_health_reports_the_corpus_and_model(client):
 def test_interview_start_returns_questions(client):
     body = client.post("/api/interview/start", json={"brief": "An invoice tracker."}).json()
     assert body["status"] == "interviewing"
-    assert len(body["questions"]) == 1
+    assert body["questions"]
     assert body["questions"][0]["why_it_matters"]
 
 

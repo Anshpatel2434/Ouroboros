@@ -100,9 +100,16 @@ def _bullets(items: list[str]) -> str:
 
 
 def write_playbook_doc(
-    playbook: StackPlaybook, root: Path | None = None
+    playbook: StackPlaybook, root: Path | None = None, slug: str | None = None
 ) -> Path:
-    """Write a playbook into the corpus in the format every document follows."""
+    """Write a playbook into the corpus in the format every document follows.
+
+    The slug is the one the *request* will look up, not one derived from the
+    playbook's own answer. A model asked about "Python 3.12 / Click / uv" may
+    describe itself as having no framework; filing the result under its own
+    description meant every later lookup missed and the same stack was
+    researched again on every single round.
+    """
     root = root or CORPUS_ROOT
     stack = StackProfile(
         language=playbook.language,
@@ -112,7 +119,7 @@ def write_playbook_doc(
     )
     directory = root / STACK_DIR
     directory.mkdir(parents=True, exist_ok=True)
-    path = directory / f"{stack_slug(stack)}.md"
+    path = directory / f"{slug or stack_slug(stack)}.md"
 
     label = f"{playbook.language} {playbook.language_version}"
     if playbook.framework:
@@ -195,6 +202,23 @@ refusing generation for this stack.
     return path
 
 
+def playbook_commands(document: CorpusDocument) -> dict[str, str]:
+    """Read the verification commands back out of a playbook we wrote.
+
+    The corpus already holds the real commands for a researched stack, so a spec
+    whose install command is the word "install" can be corrected from knowledge
+    we already have rather than by asking the developer to repeat themselves.
+    """
+    commands: dict[str, str] = {}
+    for match in re.finditer(
+        r"^- `(install|test|lint|typecheck|build|smoke)`: `([^`]+)`\s*$",
+        document.body,
+        re.MULTILINE,
+    ):
+        commands[match.group(1)] = match.group(2).strip()
+    return commands
+
+
 def ensure_playbook(
     llm: LLM, retriever: FileCorpusRetriever, stack: StackProfile, root: Path | None = None
 ) -> tuple[StackPlaybook | None, bool]:
@@ -204,7 +228,7 @@ def ensure_playbook(
         return None, False
 
     playbook = research_stack(llm, stack)
-    written = write_playbook_doc(playbook, root=root)
+    written = write_playbook_doc(playbook, root=root, slug=stack_slug(stack))
     # Make it visible to this retriever immediately, or the next round misses
     # again and pays for the same research twice.
     retriever.register(written)

@@ -206,3 +206,81 @@ def test_each_required_verification_command_is_named():
 def test_optional_commands_may_be_absent():
     spec = clean_spec(verification=VerificationPlan(install="uv sync", test="pytest -q"))
     assert lint_spec(spec).passed
+
+
+def test_empty_package_manager_blocks():
+    """A live interview produced an empty package manager and the lint passed it.
+
+    StackProfile requires the field and an empty string satisfies that, so every
+    generated command then referenced a tool that does not exist.
+    """
+    spec = clean_spec(
+        stack=StackProfile(
+            language="Python", language_version="3.12", package_manager="  ",
+            corpus_covered=True,
+        )
+    )
+    report = lint_spec(spec)
+    assert not report.passed
+    assert "INCOMPLETE_STACK" in {f.code for f in report.errors}
+
+
+def test_step_name_used_as_a_command_blocks():
+    """Extraction once returned install='install'. verify.sh would run the word."""
+    spec = clean_spec(verification=VerificationPlan(install="install", test="pytest -q"))
+    report = lint_spec(spec)
+    assert "LABEL_AS_COMMAND" in {f.code for f in report.errors}
+
+
+def test_a_real_single_word_command_is_fine():
+    spec = clean_spec(verification=VerificationPlan(install="uv sync", test="pytest"))
+    assert lint_spec(spec).passed
+
+
+def test_blank_language_version_blocks():
+    """A live run produced 'Python  / pip' — a version-less stack reaches init.sh."""
+    spec = clean_spec(
+        stack=StackProfile(
+            language="Python", language_version="", package_manager="uv", corpus_covered=True
+        )
+    )
+    errors = {f.location for f in lint_spec(spec).errors}
+    assert "stack.language_version" in errors
+
+
+def test_a_command_from_another_ecosystem_blocks():
+    """A live interview settled on `npm ci` as install for a Python/pip project.
+
+    It is a real command, so nothing that only looked for junk could see it.
+    """
+    spec = clean_spec(
+        stack=StackProfile(
+            language="Python", language_version="3.12", package_manager="pip",
+            corpus_covered=True,
+        ),
+        verification=VerificationPlan(install="npm ci", test="pytest -q"),
+    )
+    report = lint_spec(spec)
+    assert "MISMATCHED_TOOLCHAIN" in {f.code for f in report.errors}
+
+
+def test_the_matching_toolchain_passes():
+    spec = clean_spec(
+        stack=StackProfile(
+            language="Python", language_version="3.12", package_manager="pip",
+            corpus_covered=True,
+        ),
+        verification=VerificationPlan(install="pip install -r requirements.txt", test="pytest -q"),
+    )
+    assert lint_spec(spec).passed
+
+
+def test_an_unknown_package_manager_is_not_second_guessed():
+    spec = clean_spec(
+        stack=StackProfile(
+            language="Elixir", language_version="1.17", package_manager="mix",
+            corpus_covered=True,
+        ),
+        verification=VerificationPlan(install="mix deps.get", test="mix test"),
+    )
+    assert lint_spec(spec).passed

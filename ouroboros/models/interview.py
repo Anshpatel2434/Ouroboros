@@ -12,6 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
+from ouroboros.models.patches import FieldGroup
 from ouroboros.models.spec import (
     Component,
     LoopBoundaries,
@@ -46,8 +47,36 @@ class Question(BaseModel):
     why_it_matters: str = Field(
         description="Which spec field this fills and what breaks without it."
     )
+    field_group: FieldGroup = Field(
+        default=FieldGroup.REQUIREMENTS,
+        description="Which part of the spec this question's answer belongs to. "
+        "The answer is extracted into that part and nothing else, so a wrong "
+        "group means the answer lands nowhere.",
+    )
     targets: list[str] = Field(
         default_factory=list, description="Lint finding codes this question resolves."
+    )
+
+
+class SingleQuestion(BaseModel):
+    """One question about a field group the system has already chosen.
+
+    The interviewer used to tag its own questions with a field group and route
+    the answer itself. gpt-4o-mini simply omitted the tag, every answer fell
+    through to the default group, and ten rounds of good answers landed nowhere.
+    The system knows which part of the spec is empty, so it assigns the group and
+    asks only for the wording. A routing decision nobody makes cannot be wrong.
+    """
+
+    header: str = Field(description="Two or three word label for the UI.")
+    text: str = Field(description="The question itself.")
+    kind: QuestionKind = "text"
+    options: list[QuestionOption] = Field(
+        default_factory=list,
+        description="Concrete choices, when the sane answers are few. Otherwise empty.",
+    )
+    why_it_matters: str = Field(
+        description="What this fills and what breaks downstream without it."
     )
 
 
@@ -188,6 +217,19 @@ class SpecDraft(BaseModel):
         # A verification object of empty strings is "present" but useless. A live
         # interview produced exactly that and the agenda reported nothing missing,
         # so the interviewer never asked for the commands.
+        if self.stack is not None:
+            blank_stack = [
+                label
+                for label, value in (
+                    ("language", self.stack.language),
+                    ("language version", self.stack.language_version),
+                    ("package manager", self.stack.package_manager),
+                )
+                if not (value or "").strip()
+            ]
+            if blank_stack:
+                missing.append("stack " + ", ".join(blank_stack))
+
         if self.verification is not None:
             blank = [
                 label

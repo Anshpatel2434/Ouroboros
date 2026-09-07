@@ -68,6 +68,7 @@ class ProviderLimits:
         """
         share = {
             "questions": 0.28,
+            "patch": 0.60,
             # The draft is the whole spec, returned in full every round. A live
             # run was truncated mid-JSON at 2,200 tokens once the spec reached
             # eight requirements, and a half-written object fails to parse. This
