@@ -85,7 +85,7 @@ class SingleQuestion(BaseModel):
 # 4.7" parses as options "5", "6", "7" — a version list rendered to the
 # developer as nonsense, which a live interview did exactly once before this.
 _ENUMERATION = re.compile(
-    r"(?:^|[\s:;,])(\d)[).]\s+([^,;\n]{2,60}?)(?=\s*(?:,|;|\s\d[).]\s|$))"
+    r"(?:^|[\s:;,])(\d)[).]\s+([^,;\n]{2,120}?)(?=\s*(?:,|;|\s\d[).]\s|$))"
 )
 
 
@@ -132,17 +132,42 @@ _PLURAL_ASK = re.compile(
 )
 
 
-def infer_kind(text: str, options: list[QuestionOption], stated: str) -> str:
-    """Decide single- or multi-select from the wording when the model did not.
+# Parts of a spec that hold a list. A question about any of them can be answered
+# with more than one option, and that is a property of the field, not of how the
+# question happened to be phrased.
+MULTI_VALUED_GROUPS = {
+    FieldGroup.GOALS,
+    FieldGroup.COMPONENTS,
+    FieldGroup.REQUIREMENTS,
+    FieldGroup.VERIFICATION,
+    FieldGroup.GLOSSARY,
+}
+
+
+def infer_kind(
+    text: str,
+    options: list[QuestionOption],
+    stated: str,
+    group: FieldGroup | None = None,
+) -> str:
+    """Decide single- or multi-select when the model did not.
 
     Models leave `kind` as "text" while supplying options and asking for several
-    of them. Rendered as radio buttons, a question that says "select at least
-    install and test" cannot be answered at all.
+    of them. Rendered as radio buttons, "select at least install and test" cannot
+    be answered at all, and a question offering four success criteria lets the
+    developer keep exactly one — which is how a spec ends up too thin to
+    describe the project.
+
+    The field group settles it wherever possible: success criteria, components,
+    requirements, commands and definitions are lists. Wording is only consulted
+    for the groups that hold a single value.
     """
     if not options:
         return "text"
     if stated in ("single_select", "multi_select"):
         return stated
+    if group in MULTI_VALUED_GROUPS:
+        return "multi_select"
     return "multi_select" if _PLURAL_ASK.search(text) else "single_select"
 
 

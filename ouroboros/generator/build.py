@@ -19,6 +19,7 @@ from pydantic import BaseModel
 
 from ouroboros.corpus.retriever import FileCorpusRetriever
 from ouroboros.generator import templates as tpl
+from ouroboros.generator.manifest import normalise_pyproject
 from ouroboros.generator.planner import SkeletonPlan, plan_backlog, plan_skeleton
 from ouroboros.generator.review import ReviewReport, self_review
 from ouroboros.generator.runner_templates import render_runner
@@ -82,13 +83,19 @@ def assemble(spec: ProjectSpec, backlog: Backlog, skeleton: SkeletonPlan) -> Rep
     # Skeleton files last so a stack playbook can never overwrite a guardrail.
     reserved = {f.path for f in files}
     protected_prefixes = ("checks/", "state/", ".githooks/")
+    repairs: list[str] = []
     for skeleton_file in skeleton.files:
         path = skeleton_file.path.lstrip("./")
         if path in reserved or path.startswith(protected_prefixes):
             continue
-        files.append(GeneratedFile(path=path, contents=skeleton_file.contents))
+        contents = skeleton_file.contents
+        if path.rsplit("/", 1)[-1] == "pyproject.toml":
+            contents, repair = normalise_pyproject(contents)
+            if repair:
+                repairs.append(repair)
+        files.append(GeneratedFile(path=path, contents=contents))
 
-    notes = list(skeleton.notes)
+    notes = list(skeleton.notes) + repairs
     if spec.boundaries.topology is Topology.WORKTREE_FLEET:
         notes.append("Parallel topology: tasks run in isolated git worktrees.")
 

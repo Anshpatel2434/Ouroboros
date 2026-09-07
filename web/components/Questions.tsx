@@ -32,11 +32,17 @@ export default function Questions({
   }, [questions]);
 
   const answerFor = (question: Question): string => {
-    const written = other[question.id];
-    if (written !== undefined) return written;
-    return question.kind === "multi_select"
-      ? (multi[question.id] ?? []).join(", ")
-      : (values[question.id] ?? "");
+    const written = (other[question.id] ?? "").trim();
+
+    // On a multi-select, "Something else" adds to the chosen options rather
+    // than replacing them. Replacing meant a developer who ticked install,
+    // test and lint and then added a note silently lost all three.
+    if (question.kind === "multi_select") {
+      const picked = multi[question.id] ?? [];
+      return [...picked, ...(written ? [written] : [])].join(", ");
+    }
+
+    return other[question.id] !== undefined ? written : (values[question.id] ?? "");
   };
 
   const complete = questions.every((q) => answerFor(q).trim().length > 0);

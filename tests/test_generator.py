@@ -593,9 +593,13 @@ def test_pep621_dependency_table_is_caught():
             )
         ]
     )
-    issues = {f.issue for f in structural_findings(assemble(spec(), backlog(), plan)) if f.blocking}
+    blueprint = assemble(spec(), backlog(), plan)
+    issues = {f.issue for f in structural_findings(blueprint) if f.blocking}
 
-    assert "project.dependencies is not an array." in issues
+    # The dependency table is repaired during assembly rather than reported, so
+    # the check no longer sees it; the shape problems it cannot compute remain.
+    assert '"click>=8.0"' in blueprint.file("pyproject.toml").contents
+    assert "project.dependencies is not an array." not in issues
     assert "project.authors has the wrong shape." in issues
 
 
@@ -743,3 +747,66 @@ def test_unknown_package_manager_is_not_second_guessed():
     ])
     issues = {f.issue for f in structural_findings(assemble(exotic, backlog(), plan)) if f.blocking}
     assert not any("manifest" in i or "No " in i for i in issues), issues
+
+
+# --------------------------------------------------------------------------- #
+# Manifest repair — fix what we can compute, do not re-ask
+# --------------------------------------------------------------------------- #
+
+def test_a_poetry_style_dependency_table_is_repaired():
+    """The correction pass could not fix this in two attempts, twice over.
+
+    A table of name-to-constraint pairs is an array of requirement strings, and
+    we know it, so it is converted rather than re-requested.
+    """
+    from ouroboros.generator.manifest import normalise_pyproject
+    import tomllib
+
+    fixed, note = normalise_pyproject(
+        '[project]\nname = "photodate"\nversion = "0.1.0"\n\n'
+        '[project.dependencies]\nclick = "^8.0"\npillow = "*"\npython = "^3.11"\n\n'
+        '[tool.ruff]\nline-length = 88\n'
+    )
+    parsed = tomllib.loads(fixed)
+
+    assert parsed["project"]["dependencies"] == ["click>=8.0", "pillow"]
+    assert "python" not in str(parsed["project"]["dependencies"]), "expressed as requires-python"
+    assert parsed["tool"]["ruff"]["line-length"] == 88, "other tables survive"
+    assert note and "installs nothing" in note
+
+
+def test_a_poetry_table_under_tool_is_also_repaired():
+    from ouroboros.generator.manifest import normalise_pyproject
+    import tomllib
+
+    fixed, _ = normalise_pyproject(
+        '[project]\nname = "app"\n\n[tool.poetry.dependencies]\nrequests = "~2.31"\n'
+    )
+    assert tomllib.loads(fixed)["project"]["dependencies"] == ["requests>=2.31"]
+
+
+def test_a_correct_manifest_is_left_exactly_as_it_is():
+    from ouroboros.generator.manifest import normalise_pyproject
+
+    good = '[project]\nname = "app"\ndependencies = ["click>=8.0"]\n'
+    fixed, note = normalise_pyproject(good)
+    assert fixed == good
+    assert note is None
+
+
+def test_repair_runs_during_assembly_and_is_reported():
+    plan = SkeletonPlan(
+        files=[
+            SkeletonFile(
+                path="pyproject.toml",
+                purpose="manifest",
+                contents='[project]\nname = "invoice-tracker"\n\n[project.dependencies]\nclick = "^8.0"\n',
+            ),
+            SkeletonFile(path="tests/test_smoke.py", purpose="test", contents="def test_ok():\n    assert True\n"),
+        ]
+    )
+    blueprint = assemble(spec(), backlog(), plan)
+
+    assert '"click>=8.0"' in blueprint.file("pyproject.toml").contents
+    assert any("PEP 621" in note for note in blueprint.notes)
+    assert not [f for f in structural_findings(blueprint) if f.blocking], "and it now passes review"

@@ -159,3 +159,41 @@ def test_pressure_is_tracked_per_location_not_globally():
     fresh = ledger.observe(report(finding(code="UNDEFINED_TERM", location="glossary")))
     assert fresh, "a new finding elsewhere is still live"
     assert not ledger.under_pressure(fresh[0])
+
+
+def test_a_reworded_finding_is_downgraded_by_place():
+    """Waiving by fingerprint alone left the interview stuck.
+
+    Pressure waives the record we saw; the judge then rewords the same
+    complaint into a fresh fingerprint and the new one blocks exactly as the old
+    one did. A live interview sat on two coverage holes for four rounds this way.
+    """
+    from ouroboros.inquisitor.findings import MAX_PRESSURE
+
+    ledger = FindingLedger()
+    for n in range(MAX_PRESSURE):
+        live = ledger.observe(report(finding(code="COVERAGE_HOLE", evidence=f"Wording {n}.")))
+        for record in live:
+            ledger.attempt(record)
+        ledger.waive_exhausted()
+
+    fresh = report(finding(code="COVERAGE_HOLE", evidence="An entirely new phrasing."))
+    assert ledger.downgrade(fresh).passed
+
+
+def test_structural_findings_are_never_downgraded_by_pressure():
+    """No amount of repetition makes a broken install command acceptable."""
+    from ouroboros.inquisitor.findings import MAX_PRESSURE
+
+    ledger = FindingLedger()
+    for n in range(MAX_PRESSURE + 2):
+        live = ledger.observe(
+            report(finding(code="LABEL_AS_COMMAND", location="verification.install",
+                           evidence=f"Still the word install, wording {n}."))
+        )
+        for record in live:
+            ledger.attempt(record)
+        ledger.waive_exhausted()
+
+    still = report(finding(code="LABEL_AS_COMMAND", location="verification.install"))
+    assert not ledger.downgrade(still).passed

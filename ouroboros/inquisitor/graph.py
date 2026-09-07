@@ -180,7 +180,7 @@ def _ask_round(
                 id=f"q{index}",
                 header=single.header,
                 text=text,
-                kind=infer_kind(text, options, single.kind),
+                kind=infer_kind(text, options, single.kind, group),
                 options=options,
                 why_it_matters=single.why_it_matters,
                 field_group=group,

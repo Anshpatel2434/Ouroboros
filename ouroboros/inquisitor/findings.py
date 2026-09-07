@@ -269,9 +269,25 @@ class FindingLedger(BaseModel):
         if report is None:
             return None
         waived = {r.fingerprint for r in self.waivers}
+
+        def spent(finding: LintFinding) -> bool:
+            """Has this objection had its turn?
+
+            By exact identity, or by place. Matching only fingerprints left the
+            interview stuck: pressure waives the record we saw, the judge then
+            rewords the same complaint into a fresh fingerprint, and the new one
+            blocks exactly as the old one did. A place that has objected
+            MAX_PRESSURE times has been heard, whatever words it used this time.
+            """
+            if finding.code in NEVER_WAIVABLE:
+                return False
+            if fingerprint(finding) in waived:
+                return True
+            return self.pressure.get(f"{finding.code}|{finding.location}", 0) >= MAX_PRESSURE
+
         findings = [
             f.model_copy(update={"severity": Severity.WARNING})
-            if fingerprint(f) in waived and f.severity is Severity.ERROR
+            if f.severity is Severity.ERROR and spent(f)
             else f
             for f in report.findings
         ]

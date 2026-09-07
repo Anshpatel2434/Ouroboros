@@ -52,12 +52,22 @@ installed, the project's own test command must pass with zero features \
 implemented. That green baseline is what the coding agent measures every later \
 change against, so a skeleton that does not build is worse than none.
 
-Include:
-- the dependency manifest for the package manager in use
-- the directory structure the components imply, with real (tiny) modules
-- at least one genuine test that passes, exercising something real rather than \
-asserting True
-- configuration the stack conventionally needs (linter config, tsconfig, etc.)
+Every skeleton MUST contain all four of these. A skeleton missing any one of \
+them is rejected outright, so treat this as a checklist rather than advice:
+
+1. The dependency manifest for the package manager in use, declaring every \
+package the skeleton's own code imports.
+2. The package or module entry point the manifest points at, so the project \
+imports cleanly.
+3. AT LEAST ONE TEST FILE that the project's exact test command will discover \
+and that passes as written. Put it where that command looks — a `tests/` \
+directory for pytest, a `*.test.ts` beside the code or under `__tests__` for a \
+JavaScript test runner — and use the assertion style that runner expects. This \
+is the single most commonly omitted file and the most damaging: the test command \
+is what the coding agent measures every later change against, and a command with \
+nothing to run reports success forever.
+4. Configuration the stack conventionally needs (linter config, tsconfig, and so \
+on), including whatever registers the test runner.
 
 The manifest must be correct for the package manager in use, not a blend of \
 several. For Python that means PEP 621 exactly:

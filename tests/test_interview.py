@@ -696,3 +696,45 @@ def test_decimals_in_prose_are_not_options():
 
     _, options = options_from_prose("Search returns in under 1.5 seconds and 2.5 seconds")
     assert options == []
+
+
+def test_list_valued_groups_allow_more_than_one_answer():
+    """A question offering four success criteria must not keep exactly one.
+
+    Rendered as radios, it is how a spec ends up too thin to describe the
+    project — the same thinness the sufficiency checks exist to prevent.
+    """
+    from ouroboros.models.interview import QuestionOption, infer_kind
+    from ouroboros.models.patches import FieldGroup
+
+    options = [QuestionOption(label="Browse shoes"), QuestionOption(label="Checkout")]
+
+    for group in (
+        FieldGroup.GOALS,
+        FieldGroup.REQUIREMENTS,
+        FieldGroup.COMPONENTS,
+        FieldGroup.VERIFICATION,
+    ):
+        assert infer_kind("Pick some.", options, "text", group) == "multi_select", group
+
+
+def test_single_valued_groups_stay_single_select():
+    from ouroboros.models.interview import QuestionOption, infer_kind
+    from ouroboros.models.patches import FieldGroup
+
+    options = [QuestionOption(label="npm"), QuestionOption(label="pnpm")]
+    assert infer_kind("Which package manager?", options, "text", FieldGroup.STACK) == "single_select"
+    assert infer_kind("What is it called?", options, "text", FieldGroup.IDENTITY) == "single_select"
+
+
+def test_long_option_labels_are_still_parsed():
+    """Real options run long; a 60-character cap left them as unclickable prose."""
+    from ouroboros.models.interview import options_from_prose
+
+    _, options = options_from_prose(
+        "What should it state? Please select from the following options: "
+        "1) Users must be able to complete the entire shopping process in under 2 minutes, "
+        "2) Users must be able to complete the entire shopping process in under 5 minutes"
+    )
+    assert len(options) == 2
+    assert options[0].label.endswith("under 2 minutes")
