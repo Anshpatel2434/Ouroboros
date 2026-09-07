@@ -35,6 +35,8 @@ from ouroboros.llm.client import LLM, default_llm
 from ouroboros.models.patches import FieldGroup
 from ouroboros.models.interview import (
     InterviewTurn,
+    infer_kind,
+    options_from_prose,
     Question,
     QuestionBatch,
     SingleQuestion,
@@ -171,13 +173,15 @@ def _ask_round(
             user="\n\n".join(sections),
             role="questions",
         )
+        text, parsed = options_from_prose(single.text) if not single.options else (single.text, [])
+        options = single.options or parsed
         questions.append(
             Question(
                 id=f"q{index}",
                 header=single.header,
-                text=single.text,
-                kind=single.kind,
-                options=single.options,
+                text=text,
+                kind=infer_kind(text, options, single.kind),
+                options=options,
                 why_it_matters=single.why_it_matters,
                 field_group=group,
             )
@@ -351,6 +355,18 @@ def _ledger_of(state: InterviewState) -> FindingLedger:
     return FindingLedger()
 
 
+def _is_ready(draft: SpecDraft, spec, report: LintReport | None) -> bool:
+    """A clean lint is necessary but not sufficient.
+
+    The deterministic lint can only judge the parts of a spec that exist; it has
+    nothing to say about a spec with one requirement for an entire e-commerce
+    site. The agenda knows, so readiness requires it to be empty too.
+    """
+    if spec is None or report is None or not report.passed:
+        return False
+    return not draft.missing_fields()
+
+
 def _evaluate(draft: SpecDraft, deps: InquisitorDeps) -> tuple[ProjectSpec | None, LintReport | None]:
     """Lint the draft, paying for the LLM judge only when it can say something.
 
@@ -403,7 +419,7 @@ def assess(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
     ledger = _ledger_of(state)
 
     spec, report = _evaluate(draft, deps)
-    if spec is not None and report is not None and report.passed:
+    if _is_ready(draft, spec, report):
         return {
             "lint": report,
             "spec": spec,
@@ -419,7 +435,7 @@ def assess(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
     # something already fixed. One re-check per round bounds the cost.
     if edited:
         spec, report = _evaluate(draft, deps)
-        if spec is not None and report is not None and report.passed:
+        if _is_ready(draft, spec, report):
             return {
                 "draft": draft,
                 "lint": report,
@@ -436,7 +452,7 @@ def assess(state: InterviewState, deps: InquisitorDeps) -> dict[str, Any]:
     ledger.waive_exhausted()
     report = ledger.downgrade(report)
     spec_now = draft.to_spec()
-    if spec_now is not None and report is not None and report.passed:
+    if _is_ready(draft, spec_now, report):
         return {
             "draft": draft,
             "lint": report,

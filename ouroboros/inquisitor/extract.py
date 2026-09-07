@@ -52,7 +52,11 @@ GROUP_BRIEF = {
     FieldGroup.STACK: (
         "The technology: language and version, framework, package manager, "
         "database, key libraries. Use the developer's exact choices; a guessed "
-        "package manager makes every generated command wrong."
+        "package manager makes every generated command wrong. The version that "
+        "matters is the one the project is pinned to and run with — for "
+        "JavaScript or TypeScript that is the Node version (22.x) or the "
+        "TypeScript version, never an ECMAScript edition; for Python the "
+        "interpreter version. Never ask which ECMAScript edition to target."
     ),
     FieldGroup.VERIFICATION: (
         "The commands that decide whether work is acceptable: install and test "
@@ -138,12 +142,14 @@ def apply_patch(draft: SpecDraft, group: FieldGroup, patch: BaseModel) -> SpecDr
                         setattr(updated.verification, field, getattr(previous, field))
 
     elif group is FieldGroup.COMPONENTS and isinstance(patch, ComponentsPatch):
-        if patch.components:
-            updated.components = patch.components
+        updated.components = _merge_by(
+            updated.components, patch.components, key="name", remove=patch.remove_names
+        )
 
     elif group is FieldGroup.REQUIREMENTS and isinstance(patch, RequirementsPatch):
-        if patch.requirements:
-            updated.requirements = patch.requirements
+        updated.requirements = _merge_by(
+            updated.requirements, patch.requirements, key="id", remove=patch.remove_ids
+        )
 
     elif group is FieldGroup.GLOSSARY and isinstance(patch, GlossaryPatch):
         for entry in patch.entries:
@@ -151,6 +157,21 @@ def apply_patch(draft: SpecDraft, group: FieldGroup, patch: BaseModel) -> SpecDr
                 updated.glossary[entry.term.strip()] = entry.definition.strip()
 
     return updated
+
+
+def _merge_by(existing: list, incoming: list, key: str, remove: list[str]) -> list:
+    """Merge lists by identity: add new entries, update matches, keep the rest.
+
+    A spec is built up across rounds — requirements are elicited a component at
+    a time — so replacing the list would delete everything established earlier
+    every time a later round talked about something else. Removal stays possible
+    but has to be asked for explicitly.
+    """
+    dropped = {value.strip() for value in remove if value and value.strip()}
+    merged = {getattr(item, key): item for item in existing}
+    for item in incoming:
+        merged[getattr(item, key)] = item
+    return [item for identity, item in merged.items() if identity not in dropped]
 
 
 def extract_group(

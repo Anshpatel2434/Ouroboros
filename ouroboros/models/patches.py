@@ -59,11 +59,27 @@ class VerificationPatch(BaseModel):
 
 
 class ComponentsPatch(BaseModel):
+    """Components to add or update, matched by name."""
+
     components: list[Component] = Field(default_factory=list)
+    remove_names: list[str] = Field(
+        default_factory=list, description="Components to delete outright."
+    )
 
 
 class RequirementsPatch(BaseModel):
+    """Requirements to add or update, matched by id.
+
+    Additive by default. A spec is built up over several rounds — asked about
+    one component at a time — so a patch that replaced the list would delete
+    everything established earlier. Deleting is possible, but only by saying so
+    in remove_ids, which is what lets a redundant requirement actually go.
+    """
+
     requirements: list[Requirement] = Field(default_factory=list)
+    remove_ids: list[str] = Field(
+        default_factory=list, description="Requirement ids to delete outright."
+    )
 
 
 class GlossaryEntry(BaseModel):

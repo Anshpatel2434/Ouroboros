@@ -58,7 +58,10 @@ def complete_draft() -> SpecDraft:
         slug="invoice-tracker",
         one_line="Tracks freelance invoices and flags overdue ones.",
         problem="Freelancers lose money chasing invoices they forget about.",
-        success_criteria=["An invoice past its due date shows as overdue."],
+        success_criteria=[
+            "An invoice past its due date shows as overdue.",
+            "A user can record an invoice in under 30 seconds.",
+        ],
         non_goals=["No payment processing."],
         stack=StackProfile(
             language="Python",
@@ -71,9 +74,19 @@ def complete_draft() -> SpecDraft:
         requirements=[
             Requirement(
                 id="R-001",
-                statement="Record an invoice.",
+                statement="Record an invoice via the api.",
                 acceptance_criteria=["POST /invoices returns status 201."],
-            )
+            ),
+            Requirement(
+                id="R-002",
+                statement="List invoices from the api.",
+                acceptance_criteria=["GET /invoices returns status 200 and a JSON array."],
+            ),
+            Requirement(
+                id="R-003",
+                statement="Mark an overdue invoice through the api.",
+                acceptance_criteria=["An invoice past its due date reports status overdue."],
+            ),
         ],
     )
 
@@ -169,7 +182,8 @@ def test_an_answer_only_touches_its_own_field_group():
         ),
     )
 
-    assert [r.id for r in after.requirements] == ["R-042"]
+    assert "R-042" in [r.id for r in after.requirements]
+    assert "R-001" in [r.id for r in after.requirements], "earlier work survives"
     assert after.name == before.name
     assert after.stack.language == before.stack.language
     assert after.verification.test == before.verification.test
@@ -458,3 +472,227 @@ def test_a_real_command_is_never_overwritten(deps, tmp_path):
     result = ensure_stack_coverage({"draft": draft, "notices": []}, deps(llm))
     assert result["draft"].verification.install == "poetry install"
     assert result["draft"].verification.test == "pytest -q"
+
+
+def test_requirements_accumulate_across_rounds():
+    """A spec is built a component at a time; a later round must not wipe earlier work."""
+    from ouroboros.inquisitor.extract import apply_patch
+    from ouroboros.models.patches import FieldGroup, RequirementsPatch
+
+    draft = complete_draft()
+    draft.requirements = [
+        Requirement(id="R-001", statement="Browse shoes.", acceptance_criteria=["Lists items."])
+    ]
+
+    after = apply_patch(
+        draft,
+        FieldGroup.REQUIREMENTS,
+        RequirementsPatch(
+            requirements=[
+                Requirement(id="R-002", statement="Add to cart.", acceptance_criteria=["Cart shows 1."])
+            ]
+        ),
+    )
+
+    assert [r.id for r in after.requirements] == ["R-001", "R-002"]
+
+
+def test_a_requirement_can_still_be_removed_when_asked():
+    """The lint's 'R-009 is redundant, remove it' must remain actionable."""
+    from ouroboros.inquisitor.extract import apply_patch
+    from ouroboros.models.patches import FieldGroup, RequirementsPatch
+
+    draft = complete_draft()
+    draft.requirements = [
+        Requirement(id="R-001", statement="Keep.", acceptance_criteria=["ok"]),
+        Requirement(id="R-009", statement="Redundant.", acceptance_criteria=["ok"]),
+    ]
+
+    after = apply_patch(
+        draft, FieldGroup.REQUIREMENTS, RequirementsPatch(remove_ids=["R-009"])
+    )
+    assert [r.id for r in after.requirements] == ["R-001"]
+
+
+def test_an_updated_requirement_replaces_its_earlier_version():
+    from ouroboros.inquisitor.extract import apply_patch
+    from ouroboros.models.patches import FieldGroup, RequirementsPatch
+
+    draft = complete_draft()
+    draft.requirements = [Requirement(id="R-001", statement="Vague.", acceptance_criteria=["x"])]
+
+    after = apply_patch(
+        draft,
+        FieldGroup.REQUIREMENTS,
+        RequirementsPatch(
+            requirements=[
+                Requirement(id="R-001", statement="Sharpened.", acceptance_criteria=["Exit 0."])
+            ]
+        ),
+    )
+
+    assert len(after.requirements) == 1
+    assert after.requirements[0].statement == "Sharpened."
+
+
+# --------------------------------------------------------------------------- #
+# Sufficiency — presence is not enough
+# --------------------------------------------------------------------------- #
+
+def thin_draft() -> SpecDraft:
+    """What every run used to end with: every box ticked, nothing described."""
+    draft = complete_draft()
+    draft.success_criteria = ["It works."]
+    draft.non_goals = []
+    draft.components = [
+        Component(name="catalog", responsibility="Lists shoes.", paths=["src/catalog/"]),
+        Component(name="cart", responsibility="Holds a basket.", paths=["src/cart/"]),
+    ]
+    draft.requirements = [
+        Requirement(id="R-001", statement="Browse the catalog.", acceptance_criteria=["Lists shoes."])
+    ]
+    return draft
+
+
+def test_a_thin_spec_is_not_finished():
+    """One requirement cannot describe an e-commerce site, and the agenda must know.
+
+    Every part was non-empty, so the old agenda went quiet and the interview
+    ended. Presence was standing in for sufficiency.
+    """
+    missing = thin_draft().missing_fields()
+
+    assert any("success_criteria" in m and "at least" in m for m in missing)
+    assert any("non_goals" in m for m in missing)
+    assert any("requirements" in m and "at least" in m for m in missing)
+
+
+def test_the_agenda_names_the_component_with_no_requirements():
+    """A question aimed at 'cart' beats another vague request for requirements."""
+    missing = thin_draft().missing_fields()
+    requirement_gap = next(m for m in missing if m.startswith("requirements"))
+    assert "cart" in requirement_gap
+
+
+def test_a_sufficient_spec_is_finished():
+    assert complete_draft().missing_fields() == []
+
+
+def test_a_thin_draft_cannot_become_a_spec_at_all():
+    """The strongest form of the guarantee: it never reaches ProjectSpec.
+
+    The deterministic lint can only judge the parts that exist and has no
+    objection to one requirement for an entire e-commerce site — so the refusal
+    has to happen at promotion, not after it.
+    """
+    from ouroboros.inquisitor.graph import _is_ready
+    from ouroboros.inquisitor.lint import lint_spec
+    from ouroboros.models.spec import ProjectSpec
+
+    draft = thin_draft()
+    assert draft.to_spec() is None, "a thin draft is not a specification"
+
+    # Built directly, the same content sails through the lint — which is exactly
+    # why sufficiency cannot live there alone.
+    forced = ProjectSpec(
+        name=draft.name, slug=draft.slug, one_line=draft.one_line, problem=draft.problem,
+        success_criteria=draft.success_criteria, non_goals=draft.non_goals,
+        stack=draft.stack, verification=draft.verification,
+        components=draft.components, requirements=draft.requirements,
+    )
+    forced.stack.corpus_covered = True
+    assert lint_spec(forced).passed, [f.code for f in lint_spec(forced).errors]
+    assert not _is_ready(draft, forced, lint_spec(forced))
+
+
+# --------------------------------------------------------------------------- #
+# Question usability
+# --------------------------------------------------------------------------- #
+
+def test_choices_written_as_prose_become_clickable_options():
+    """Models keep writing choices into the sentence instead of the options field.
+
+    The developer then types an answer to something they should have clicked,
+    and the free-text answer extracts less cleanly than a chosen label.
+    """
+    from ouroboros.models.interview import options_from_prose
+
+    text, options = options_from_prose(
+        "Which package manager? Please choose one of the following: 1) npm, 2) yarn, 3) pnpm"
+    )
+
+    assert [o.label for o in options] == ["npm", "yarn", "pnpm"]
+    assert text == "Which package manager?"
+    assert "1)" not in text
+
+
+def test_a_plain_question_is_left_alone():
+    from ouroboros.models.interview import options_from_prose
+
+    text, options = options_from_prose("What is the project called?")
+    assert options == []
+    assert text == "What is the project called?"
+
+
+def test_a_single_numbered_item_is_not_a_choice():
+    """One option is not a choice, and a stray '1)' should not become one."""
+    from ouroboros.models.interview import options_from_prose
+
+    _, options = options_from_prose("Describe step 1) of the flow")
+    assert options == []
+
+
+def test_a_broken_run_of_numbers_is_left_alone():
+    from ouroboros.models.interview import options_from_prose
+
+    _, options = options_from_prose("Pick: 1) alpha, 5) beta, 9) gamma")
+    assert options == []
+
+
+def test_a_question_asking_for_several_answers_becomes_multi_select():
+    """Rendered as radios, "select at least install and test" is unanswerable."""
+    from ouroboros.models.interview import QuestionOption, infer_kind
+
+    options = [QuestionOption(label="install"), QuestionOption(label="test")]
+    assert infer_kind(
+        "Which of the following commands do you want? Select at least install and test.",
+        options,
+        "text",
+    ) == "multi_select"
+
+
+def test_a_single_choice_question_stays_single_select():
+    from ouroboros.models.interview import QuestionOption, infer_kind
+
+    options = [QuestionOption(label="npm"), QuestionOption(label="pnpm")]
+    assert infer_kind("Which package manager do you want?", options, "text") == "single_select"
+
+
+def test_an_explicit_kind_from_the_model_is_respected():
+    from ouroboros.models.interview import QuestionOption, infer_kind
+
+    options = [QuestionOption(label="a"), QuestionOption(label="b")]
+    assert infer_kind("Pick all that apply.", options, "single_select") == "single_select"
+
+
+def test_no_options_means_free_text():
+    from ouroboros.models.interview import infer_kind
+
+    assert infer_kind("Which of the following?", [], "text") == "text"
+
+
+def test_version_numbers_are_not_mistaken_for_options():
+    """A live round rendered TypeScript 4.5/4.6/4.7 as options '5', '6', '7'."""
+    from ouroboros.models.interview import options_from_prose
+
+    _, options = options_from_prose(
+        "Which version do you want? TypeScript 4.5, 4.6, 4.7, 4.8, 5.0"
+    )
+    assert options == []
+
+
+def test_decimals_in_prose_are_not_options():
+    from ouroboros.models.interview import options_from_prose
+
+    _, options = options_from_prose("Search returns in under 1.5 seconds and 2.5 seconds")
+    assert options == []

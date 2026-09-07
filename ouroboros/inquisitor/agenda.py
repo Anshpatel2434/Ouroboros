@@ -27,6 +27,7 @@ _MISSING_TO_GROUP: list[tuple[str, FieldGroup]] = [
     ("stack", FieldGroup.STACK),
     ("verification", FieldGroup.VERIFICATION),
     ("success_criteria", FieldGroup.GOALS),
+    ("non_goals", FieldGroup.GOALS),
     ("components", FieldGroup.COMPONENTS),
     ("paths for components", FieldGroup.COMPONENTS),
     ("requirements", FieldGroup.REQUIREMENTS),

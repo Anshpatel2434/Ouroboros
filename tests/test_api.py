@@ -22,13 +22,37 @@ from tests.test_generator import backlog, skeleton
 from tests.test_interview import answers_for, complete_draft, full_llm
 
 
+def covering_backlog() -> Backlog:
+    """A backlog covering every requirement the interview fixture produces.
+
+    Coverage is a blocking structural check, so a scripted backlog has to keep
+    pace with the scripted spec — the same discipline the real planner is held to.
+    """
+    from ouroboros.models.blueprint import Task
+
+    return Backlog(
+        tasks=[
+            Task(
+                id=f"T-00{n}",
+                title=f"Deliver R-00{n}",
+                requirement_id=f"R-00{n}",
+                intent="Implement it.",
+                scope_paths=["app/"],
+                done_when=["The endpoint responds as specified."],
+                check_script="echo checking && exit 0",
+            )
+            for n in (1, 2, 3)
+        ]
+    )
+
+
 @pytest.fixture
 def client(monkeypatch, tmp_path):
     """A client whose interview and generation both run on scripted models."""
     interview_llm = full_llm()
     generation_llm = FakeLLM(
         {
-            Backlog: [backlog()],
+            Backlog: [covering_backlog()],
             SkeletonPlan: [skeleton()],
             ReviewReport: [ReviewReport(findings=[], verdict="pass")],
         }

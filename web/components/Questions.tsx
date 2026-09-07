@@ -20,17 +20,24 @@ export default function Questions({
 }: Props) {
   const [values, setValues] = useState<Record<string, string>>({});
   const [multi, setMulti] = useState<Record<string, string[]>>({});
+  // Free text for "Something else", kept separate so choosing it clears any
+  // option the developer had picked before changing their mind.
+  const [other, setOther] = useState<Record<string, string>>({});
 
   // A new round is a new set of questions; never carry answers across.
   useEffect(() => {
     setValues({});
     setMulti({});
+    setOther({});
   }, [questions]);
 
-  const answerFor = (question: Question): string =>
-    question.kind === "multi_select"
+  const answerFor = (question: Question): string => {
+    const written = other[question.id];
+    if (written !== undefined) return written;
+    return question.kind === "multi_select"
       ? (multi[question.id] ?? []).join(", ")
       : (values[question.id] ?? "");
+  };
 
   const complete = questions.every((q) => answerFor(q).trim().length > 0);
 
@@ -70,7 +77,11 @@ export default function Questions({
           <p className="question__text">{question.text}</p>
           <p className="question__why">{question.why_it_matters}</p>
 
-          {question.kind === "text" || question.options.length === 0 ? (
+          {/* Options decide the control, not `kind`. A model that supplies three
+              choices while leaving kind as "text" is common, and keying off kind
+              first hid real options behind a text box — the developer typed an
+              answer to something they should have clicked. */}
+          {question.options.length === 0 ? (
             <textarea
               rows={3}
               value={values[question.id] ?? ""}
@@ -122,6 +133,48 @@ export default function Questions({
                   </label>
                 );
               })}
+
+              {/* None of the options may fit, and a developer with no way to say
+                  so either abandons the interview or picks something untrue —
+                  which then becomes a requirement nobody wanted. */}
+              <label
+                className={`option${
+                  other[question.id] !== undefined ? " option--selected" : ""
+                }`}
+              >
+                <input
+                  type={question.kind === "multi_select" ? "checkbox" : "radio"}
+                  name={question.id}
+                  checked={other[question.id] !== undefined}
+                  onChange={() =>
+                    setOther((previous) => {
+                      const next = { ...previous };
+                      if (question.id in next) {
+                        delete next[question.id];
+                      } else {
+                        next[question.id] = "";
+                      }
+                      return next;
+                    })
+                  }
+                />
+                <span className="option__label">Something else</span>
+              </label>
+
+              {other[question.id] !== undefined ? (
+                <textarea
+                  rows={2}
+                  style={{ marginTop: 8 }}
+                  value={other[question.id]}
+                  placeholder="In your own words"
+                  onChange={(event) =>
+                    setOther((previous) => ({
+                      ...previous,
+                      [question.id]: event.target.value,
+                    }))
+                  }
+                />
+              ) : null}
             </div>
           )}
         </div>
